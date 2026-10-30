@@ -1,6 +1,6 @@
 import { promises as fs } from "node:fs";
 import path from "node:path";
-import { builtinAgents, groupBySkillsDir, resolveAgents, type AgentProfile } from "./agents.js";
+import { builtinAgents, planLinkGroups, resolveAgents, type AgentProfile } from "./agents.js";
 import { SkillsymError } from "./errors.js";
 import { pathExists } from "./fsutil.js";
 import { hashSkillDir } from "./hash.js";
@@ -18,7 +18,9 @@ export type LinkOutcome =
   /** Something skillsym did not create occupies the path; left untouched. */
   | "blocked"
   /** The link could not be created (e.g. permissions). */
-  | "failed";
+  | "failed"
+  /** No link needed: the agent already loads the skill from another assigned agent's folder. */
+  | "covered";
 
 export interface AgentLinkResult {
   skill: string;
@@ -67,16 +69,39 @@ export async function assignSkills(hub: Hub, options: AssignOptions): Promise<As
       }
 
       const results: AgentLinkResult[] = [];
+      const requested = agents.map((a) => a.id);
       for (const name of skillNames) {
         const target = path.join(hub.skillsDir, name);
+        const entry = manifest.skills[name]!;
+        // Plan over everything assigned after this call, so coverage accounts for existing agents too.
+        const all = profiles.filter((p) => requested.includes(p.id) || entry.agents.includes(p.id));
         let hash: string | undefined;
-        for (const group of groupBySkillsDir(agents)) {
+        const healthy: string[] = [];
+        for (const group of planLinkGroups(all)) {
           const linkPath = path.join(group.dir, name);
-          const ids = group.agents.map((a) => a.id);
+          const ids = group.agents.map((a) => a.id).filter((id) => requested.includes(id));
+          if (!ids.length) {
+            // Not part of this request, but it may cover a requested group if its link is in place.
+            const onDisk = await readLinkTarget(linkPath);
+            if (!group.coveredBy && onDisk && samePath(onDisk, target)) healthy.push(group.dir);
+            continue;
+          }
+          if (group.coveredBy && healthy.some((d) => samePath(d, group.coveredBy!.dir))) {
+            results.push({
+              skill: name,
+              agents: ids,
+              path: linkPath,
+              outcome: "covered",
+              reason: `already loads it from ${group.coveredBy.dir} (${group.coveredBy.agents.join(", ")}); no second link, so it is not loaded twice`,
+            });
+            entry.agents = unique([...entry.agents, ...ids]).sort();
+            continue;
+          }
           const ours = state.links.find((l) => samePath(l.path, linkPath));
           const onDisk = await readLinkTarget(linkPath);
 
           if (ours && onDisk && samePath(onDisk, target)) {
+            healthy.push(group.dir);
             results.push({ skill: name, agents: ids, path: linkPath, outcome: "already-linked" });
           } else if (await pathExists(linkPath)) {
             results.push({
@@ -96,13 +121,13 @@ export async function assignSkills(hub: Hub, options: AssignOptions): Promise<As
               hash ??= await hashSkillDir(target);
               state.links = state.links.filter((l) => !samePath(l.path, linkPath));
               state.links.push({ path: linkPath, target, skill: name, kind, hash, createdAt: new Date().toISOString() });
+              healthy.push(group.dir);
               results.push({ skill: name, agents: ids, path: linkPath, outcome: "linked" });
             } catch (err) {
               results.push({ skill: name, agents: ids, path: linkPath, outcome: "failed", reason: (err as Error).message });
               continue;
             }
           }
-          const entry = manifest.skills[name]!;
           entry.agents = unique([...entry.agents, ...ids]).sort();
         }
       }

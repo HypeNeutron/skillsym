@@ -19,6 +19,8 @@ export type SyncActionType =
   | "replace-identical"
   /** Our link is no longer assigned: remove the link. */
   | "unlink-orphan"
+  /** Our link duplicates a skill the agent already loads from another folder: remove the link. */
+  | "unlink-duplicate"
   /** A recorded link is no longer ours on disk (gone or replaced): forget it, touch nothing. */
   | "forget"
   /** A correct link to the hub that state.json does not know about: record it. */
@@ -103,6 +105,10 @@ async function planEntry(hub: Hub, state: State, e: StatusEntry, plan: SyncPlan)
   const conflict = (type: SyncConflictType, message: string) => plan.conflicts.push({ type, ...base, message });
 
   switch (e.status) {
+    case "covered":
+      return;
+    case "duplicate":
+      return void plan.actions.push({ type: "unlink-duplicate", ...base });
     case "synced":
       if (!e.owned) plan.actions.push({ type: "record", ...base });
       return;
@@ -147,6 +153,7 @@ async function apply(hub: Hub, state: State, action: SyncAction): Promise<SyncAc
         return { ...action, ok: true, ...(backup ? { backup } : {}) };
       }
       case "unlink-orphan":
+      case "unlink-duplicate":
         await removeDirLink(action.path);
         forget(state, action.path);
         return { ...action, ok: true };

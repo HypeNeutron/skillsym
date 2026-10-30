@@ -38,7 +38,7 @@ beforeEach(async () => {
   profiles = builtinAgents(userHome);
   await addSkill(hub, await makeSkill(path.join(root, "src"), "coding", { "a.md": "A" }));
   await addSkill(hub, await makeSkill(path.join(root, "src"), "research"));
-  await assignSkills(hub, { skills: ["coding"], agents: ["claude", "cursor", "codex", "universal"], profiles });
+  await assignSkills(hub, { skills: ["coding"], agents: ["claude", "codex", "universal"], profiles });
   await assignSkills(hub, { skills: ["research"], agents: ["claude"], profiles });
 });
 
@@ -59,13 +59,13 @@ async function removeLink(p: string) {
 
 describe("remove -a: unassign some agents", () => {
   it("removes only that agent's link and assignment", async () => {
-    const { links, removedSkills } = await remove({ skills: ["coding"], agents: ["cursor"] });
+    const { links, removedSkills } = await remove({ skills: ["coding"], agents: ["claude"] });
 
-    expect(links).toEqual([{ skill: "coding", agents: ["cursor"], path: path.join(dir("cursor"), "coding"), outcome: "unlinked" }]);
+    expect(links).toEqual([{ skill: "coding", agents: ["claude"], path: path.join(dir("claude"), "coding"), outcome: "unlinked" }]);
     expect(removedSkills).toEqual([]);
-    expect(await listDir(dir("cursor"))).toEqual([]);
-    expect(await readLinkTarget(path.join(dir("claude"), "coding"))).toBe(hubSkill());
-    expect(await agentsOf("coding")).toEqual(["claude", "codex", "universal"]);
+    expect(await listDir(dir("claude"))).toEqual(["research"]);
+    expect(await readLinkTarget(path.join(dir("agents"), "coding"))).toBe(hubSkill());
+    expect(await agentsOf("coding")).toEqual(["codex", "universal"]);
     expect(await listDir(hubSkill())).toEqual(["SKILL.md", "a.md"]);
     expect((await scanStatus(hub, { profiles })).clean).toBe(true);
   });
@@ -78,7 +78,7 @@ describe("remove -a: unassign some agents", () => {
     const second = await remove({ skills: ["coding"], agents: ["universal"] });
     expect(second.links[0]).toMatchObject({ agents: ["universal"], outcome: "unlinked" });
     expect(await listDir(dir("agents"))).toEqual([]);
-    expect(await agentsOf("coding")).toEqual(["claude", "cursor"]);
+    expect(await agentsOf("coding")).toEqual(["claude"]);
   });
 
   it("reports agents that were not assigned", async () => {
@@ -104,8 +104,7 @@ describe("remove without -a: remove the skill entirely", () => {
     const hashBefore = await hashSkillDir(hubSkill());
     const { links, removedSkills } = await remove({ skills: ["coding"] });
 
-    expect(links.map((l) => l.outcome)).toEqual(["unlinked", "unlinked", "unlinked"]);
-    expect(await listDir(dir("cursor"))).toEqual([]);
+    expect(links.map((l) => l.outcome)).toEqual(["unlinked", "unlinked"]);
     expect(await listDir(dir("agents"))).toEqual([]);
     expect(await listDir(dir("claude"))).toEqual(["research"]);
     expect(await agentsOf("coding")).toBeUndefined();
@@ -123,7 +122,6 @@ describe("remove without -a: remove the skill entirely", () => {
 
     await remove({ skills: ["coding"] });
 
-    expect(await listDir(dir("cursor"))).toEqual([]);
     expect(await listDir(dir("agents"))).toEqual([]);
   });
 
@@ -148,7 +146,7 @@ describe("remove safety", () => {
 
     const { links, removedSkills } = await remove({ skills: ["coding"], dryRun: true });
 
-    expect(links.map((l) => l.outcome)).toEqual(["unlinked", "unlinked", "unlinked"]);
+    expect(links.map((l) => l.outcome)).toEqual(["unlinked", "unlinked"]);
     expect(removedSkills).toEqual([{ skill: "coding" }]);
     expect(await snapshot()).toEqual(before);
   });

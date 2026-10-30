@@ -1,6 +1,6 @@
 import { promises as fs } from "node:fs";
 import path from "node:path";
-import { builtinAgents, groupBySkillsDir, type AgentProfile } from "./agents.js";
+import { builtinAgents, groupBySkillsDir, planLinkGroups, type AgentProfile } from "./agents.js";
 import { isDirectory, isFile } from "./fsutil.js";
 import { hashSkillDir, hasUtf8Bom } from "./hash.js";
 import type { Hub } from "./hub.js";
@@ -20,7 +20,11 @@ export type LinkStatus =
   /** Assigned, but the path holds something skillsym never created. */
   | "blocked"
   /** We created this link, but the manifest no longer assigns it. */
-  | "orphaned";
+  | "orphaned"
+  /** No link needed: the agent loads the skill from another assigned agent's folder. */
+  | "covered"
+  /** Our link is here although the agent already loads the skill from another folder (loaded twice). */
+  | "duplicate";
 
 export interface StatusEntry {
   skill: string;
@@ -34,6 +38,8 @@ export interface StatusEntry {
   sameContent?: boolean;
   /** Where the link at this path points, if it is a link. */
   linkTarget?: string;
+  /** For "covered" and "duplicate": the folder the agent already loads the skill from. */
+  coveredBy?: { dir: string; agents: string[] };
 }
 
 /** A skill folder in an agent's skills folder that skillsym does not manage. */
@@ -56,7 +62,7 @@ export interface StatusReport {
   entries: StatusEntry[];
   unmanaged: UnmanagedEntry[];
   warnings: StatusWarning[];
-  /** True when every entry is synced (unmanaged skills do not count as drift). */
+  /** True when every entry is synced or covered (unmanaged skills do not count as drift). */
   clean: boolean;
 }
 
@@ -88,11 +94,30 @@ export async function scanStatus(hub: Hub, options: ScanOptions = {}): Promise<S
           skill: name,
         });
     }
-    for (const group of groupBySkillsDir(assigned)) {
+    const synced: string[] = [];
+    for (const group of planLinkGroups(assigned)) {
       const linkPath = path.join(group.dir, name);
+      const ids = group.agents.map((a) => a.id);
       expectedPaths.push(linkPath);
       const owned = state.links.find((l) => samePath(l.path, linkPath));
-      entries.push(await classify(name, group.agents.map((a) => a.id), linkPath, target, owned));
+      // Coverage only counts when the covering link is really there.
+      if (group.coveredBy && synced.some((d) => samePath(d, group.coveredBy!.dir))) {
+        const onDisk = await readLinkTarget(linkPath);
+        const ourLink = Boolean(owned && onDisk && (samePath(onDisk, target) || samePath(onDisk, owned.target)));
+        entries.push({
+          skill: name,
+          agents: ids,
+          path: linkPath,
+          status: ourLink ? "duplicate" : "covered",
+          owned: Boolean(owned),
+          coveredBy: group.coveredBy,
+          ...(onDisk ? { linkTarget: onDisk } : {}),
+        });
+        continue;
+      }
+      const entry = await classify(name, ids, linkPath, target, owned);
+      if (entry.status === "synced") synced.push(group.dir);
+      entries.push(entry);
     }
     if (await hasBom(path.join(target, "SKILL.md"))) {
       warnings.push({
@@ -118,7 +143,7 @@ export async function scanStatus(hub: Hub, options: ScanOptions = {}): Promise<S
   }
 
   const unmanaged = await findUnmanaged(profiles, [...expectedPaths, ...state.links.map((l) => l.path)]);
-  return { entries, unmanaged, warnings, clean: entries.every((e) => e.status === "synced") };
+  return { entries, unmanaged, warnings, clean: entries.every((e) => e.status === "synced" || e.status === "covered") };
 }
 
 async function classify(

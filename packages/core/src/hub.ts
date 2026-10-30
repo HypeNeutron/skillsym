@@ -14,6 +14,8 @@ export interface Hub {
   manifestPath: string;
   /** Record of every link skillsym created. */
   statePath: string;
+  /** User settings, e.g. custom agent profiles. Optional. */
+  configPath: string;
   lockPath: string;
 }
 
@@ -37,6 +39,7 @@ export function hubPaths(home: string): Hub {
     tmpDir: path.join(home, ".tmp"),
     manifestPath: path.join(home, "manifest.json"),
     statePath: path.join(home, "state.json"),
+    configPath: path.join(home, "config.json"),
     lockPath: path.join(home, ".lock"),
   };
 }

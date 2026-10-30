@@ -4,7 +4,7 @@ import { parseArgs } from "node:util";
 import {
   addSkill,
   assignSkills,
-  builtinAgents,
+  loadProfiles,
   listSkills,
   openHub,
   resolveHubHome,
@@ -92,7 +92,7 @@ async function run(argv: string[], io: Io, json: boolean): Promise<ExitCode> {
 
   const hub = await openHub(resolveHubHome({ env: io.env }));
   // Agents' folders come from the env we were given, never from process-global state.
-  const profiles = builtinAgents(userHome(io.env));
+  const profiles = await loadProfiles(hub, userHome(io.env));
   const agents = values.all ? ["*"] : (values.agent ?? []);
   switch (command) {
     case "add": {
@@ -233,6 +233,7 @@ const OUTCOME_MARK: Record<AgentLinkResult["outcome"], string> = {
   "already-linked": "already linked",
   blocked: "BLOCKED       ",
   failed: "FAILED        ",
+  covered: "covered       ",
 };
 
 function formatLinks(results: AgentLinkResult[]): string {
@@ -252,15 +253,18 @@ const STATUS_HINT: Record<StatusReport["entries"][number]["status"], string> = {
   replaced: "skillsym's link was replaced",
   blocked: "occupied by something skillsym did not create; use `skillsym import`",
   orphaned: "no longer assigned in the manifest; `skillsym sync` will remove the link",
+  covered: "",
+  duplicate: "the agent also loads this skill from another folder, so it is loaded twice; `skillsym sync` will remove this link",
 };
 
 function formatStatus(report: StatusReport): string {
   const lines: string[] = [];
   if (!report.entries.length) lines.push("No skills assigned yet. Assign one with: skillsym assign <skill> -a <agents>");
   for (const e of report.entries) {
-    const label = e.status === "synced" ? "synced  " : e.status.toUpperCase().padEnd(8);
+    const label = e.status === "synced" || e.status === "covered" ? e.status.padEnd(8) : e.status.toUpperCase().padEnd(8);
     const who = e.agents.length ? e.agents.join(", ") : "(unassigned)";
     let hint = STATUS_HINT[e.status];
+    if (e.status === "covered" && e.coveredBy) hint = `loads it from ${e.coveredBy.dir} (${e.coveredBy.agents.join(", ")}); no second link needed`;
     if (e.status === "replaced") hint += e.sameContent ? " by an identical copy; `skillsym sync` will re-link it" : " by different content; `skillsym sync` will ask";
     lines.push(`${label}  ${e.skill} -> ${who}  (${e.path})${hint ? `\n          ${hint}` : ""}`);
   }
@@ -282,6 +286,7 @@ const ACTION_TEXT: Record<SyncAction["type"], [string, string]> = {
   relink: ["would re-link", "re-linked"],
   "replace-identical": ["would restore link over identical copy", "restored link over identical copy"],
   "unlink-orphan": ["would remove unassigned link", "removed unassigned link"],
+  "unlink-duplicate": ["would remove duplicate link", "removed duplicate link"],
   forget: ["would stop tracking", "stopped tracking"],
   record: ["would record existing link", "recorded existing link"],
 };

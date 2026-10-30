@@ -180,9 +180,9 @@ describe("skillsym CLI", () => {
   });
 
   it("remove -a unassigns; full remove needs -y without a terminal", async () => {
-    run(["add", await makeSkill(path.join(root, "src"), "coding"), "-a", "claude,cursor"]);
+    run(["add", await makeSkill(path.join(root, "src"), "coding"), "-a", "claude,codex"]);
 
-    const partial = run(["remove", "coding", "-a", "cursor", "--json"]);
+    const partial = run(["remove", "coding", "-a", "codex", "--json"]);
     expect(partial.code).toBe(0);
     expect(JSON.parse(partial.stdout).links[0].outcome).toBe("unlinked");
 
@@ -195,6 +195,19 @@ describe("skillsym CLI", () => {
     expect(removed.code).toBe(0);
     expect(JSON.parse(removed.stdout).removedSkills[0].skill).toBe("coding");
     expect(JSON.parse(run(["ls", "--json"]).stdout).skills).toEqual([]);
+  });
+
+  it("uses custom agents from config.json, and a broken config stops every command", async () => {
+    run(["list"]);
+    await fs.writeFile(path.join(home, "config.json"), JSON.stringify({ version: 1, agents: [{ id: "windsurf", skillsDir: "~/.windsurf/skills" }] }));
+    const r = run(["add", await makeSkill(path.join(root, "src"), "coding"), "-a", "windsurf", "--json"]);
+    expect(r.code).toBe(0);
+    expect(JSON.parse(r.stdout).assigned[0].path).toBe(path.join(root, "user", ".windsurf", "skills", "coding"));
+
+    await fs.writeFile(path.join(home, "config.json"), "{ broken");
+    const broken = run(["status", "--json"]);
+    expect(broken.code).toBe(2);
+    expect(JSON.parse(broken.stdout).error.code).toBe("CONFIG_INVALID");
   });
 
   it("serializes concurrent adds from separate processes", async () => {

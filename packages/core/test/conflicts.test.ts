@@ -25,7 +25,7 @@ let hub: Hub;
 let profiles: AgentProfile[];
 
 const claudeDir = () => path.join(userHome, ".claude", "skills");
-const cursorDir = () => path.join(userHome, ".cursor", "skills");
+const codexDir = () => path.join(userHome, ".agents", "skills");
 const claudeLink = (skill = "coding") => path.join(claudeDir(), skill);
 const hubSkill = (skill = "coding") => path.join(hub.skillsDir, skill);
 
@@ -36,7 +36,7 @@ beforeEach(async () => {
   hub = await openHub(path.join(root, "hub"));
   profiles = builtinAgents(userHome);
   await addSkill(hub, await makeSkill(path.join(root, "src"), "coding", { "hub.md": "hub version" }));
-  await assignSkills(hub, { skills: ["coding"], agents: ["claude", "cursor"], profiles });
+  await assignSkills(hub, { skills: ["coding"], agents: ["claude", "codex"], profiles });
 });
 
 afterEach(async () => {
@@ -70,7 +70,7 @@ describe("replaced by different content", () => {
     expect(await readLinkTarget(claudeLink())).toBe(hubSkill());
     expect(r!.backups).toHaveLength(1);
     expect(await fs.readFile(path.join(r!.backups[0]!, "agent.md"), "utf8")).toBe("agent version");
-    expect(await statuses()).toEqual(["coding:claude:synced", "coding:cursor:synced"]);
+    expect(await statuses()).toEqual(["coding:claude:synced", "coding:codex:synced"]);
   });
 
   it("adopt: the agent's version becomes the hub's, every agent sees it, old hub version is backed up", async () => {
@@ -79,12 +79,12 @@ describe("replaced by different content", () => {
     expect(r!.ok).toBe(true);
     expect(await fs.readFile(path.join(hubSkill(), "agent.md"), "utf8")).toBe("agent version");
     expect(await listDir(hubSkill())).not.toContain("hub.md");
-    expect(await fs.readFile(path.join(cursorDir(), "coding", "agent.md"), "utf8")).toBe("agent version");
+    expect(await fs.readFile(path.join(codexDir(), "coding", "agent.md"), "utf8")).toBe("agent version");
     expect(await readLinkTarget(claudeLink())).toBe(hubSkill());
 
     const hubBackup = r!.backups.find((b) => (b.split(path.sep).includes("hub")));
     expect(await fs.readFile(path.join(hubBackup!, "hub.md"), "utf8")).toBe("hub version");
-    expect(await statuses()).toEqual(["coding:claude:synced", "coding:cursor:synced"]);
+    expect(await statuses()).toEqual(["coding:claude:synced", "coding:codex:synced"]);
   });
 
   it("fork: keeps the agent's version as a new skill for that agent only", async () => {
@@ -97,9 +97,9 @@ describe("replaced by different content", () => {
     expect(await listDir(claudeDir())).toEqual(["coding-claude"]);
 
     const manifest = await readManifest(hub.manifestPath);
-    expect(manifest.skills.coding!.agents).toEqual(["cursor"]);
+    expect(manifest.skills.coding!.agents).toEqual(["codex"]);
     expect(manifest.skills["coding-claude"]!.agents).toEqual(["claude"]);
-    expect(await statuses()).toEqual(["coding:cursor:synced", "coding-claude:claude:synced"]);
+    expect(await statuses()).toEqual(["coding:codex:synced", "coding-claude:claude:synced"]);
   });
 
   it("fork: uses a custom name, and refuses a taken name without changing anything", async () => {
@@ -154,8 +154,8 @@ describe("our link was removed", () => {
   it("drop: unassigns the skill from that agent and stops tracking the path", async () => {
     const [r] = await resolve([{ path: claudeLink(), choice: "drop" }]);
     expect(r!.ok).toBe(true);
-    expect((await readManifest(hub.manifestPath)).skills.coding!.agents).toEqual(["cursor"]);
-    expect((await readState(hub.statePath)).links.map((l) => l.path)).toEqual([path.join(cursorDir(), "coding")]);
+    expect((await readManifest(hub.manifestPath)).skills.coding!.agents).toEqual(["codex"]);
+    expect((await readState(hub.statePath)).links.map((l) => l.path)).toEqual([path.join(codexDir(), "coding")]);
     expect((await scanStatus(hub, { profiles })).clean).toBe(true);
   });
 });
@@ -167,7 +167,7 @@ describe("other cases", () => {
     const results = await resolve(conflicts.map((c) => ({ path: c.path, choice: "drop" as const })));
     expect(results.every((r) => r.ok)).toBe(true);
     expect(await listDir(claudeDir())).toEqual([]);
-    expect(await listDir(cursorDir())).toEqual([]);
+    expect(await listDir(codexDir())).toEqual([]);
     expect((await readManifest(hub.manifestPath)).skills.coding!.agents).toEqual([]);
   });
 

@@ -9,7 +9,8 @@ export type ErrorCode =
   | "UNKNOWN_AGENT"
   | "SKILL_NOT_IN_HUB"
   | "STATE_CORRUPT"
-  | "UNSUPPORTED_STATE_VERSION";
+  | "UNSUPPORTED_STATE_VERSION"
+  | "CONFIG_INVALID";
 
 /** Every failure core reports to callers. Callers map it to output and exit codes. */
 export class SkillsymError extends Error {

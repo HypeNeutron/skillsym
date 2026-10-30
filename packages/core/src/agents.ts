@@ -75,6 +75,36 @@ export function groupBySkillsDir(agents: AgentProfile[]): { dir: string; agents:
   return groups;
 }
 
+export interface LinkGroup {
+  dir: string;
+  agents: AgentProfile[];
+  /**
+   * Set when every agent in this group already loads the skill from another group's folder
+   * (e.g. Cursor reads ~/.claude/skills). No link is made here then, so the agent does not load
+   * the skill twice.
+   */
+  coveredBy?: { dir: string; agents: string[] };
+}
+
+/**
+ * Decide which folders need a link for one skill assigned to `agents`. Agents sharing a folder
+ * get one link; a group whose agents all read another linked group's folder gets none.
+ * Groups that read fewer other folders come first, so coverage is deterministic, two groups can
+ * never cover each other, and a covering group is always listed before the groups it covers.
+ * Callers should only honour `coveredBy` when the covering group's link is actually in place.
+ */
+export function planLinkGroups(agents: AgentProfile[]): LinkGroup[] {
+  const reads = (g: LinkGroup) => Math.max(...g.agents.map((a) => a.alsoReads.length));
+  const order: LinkGroup[] = groupBySkillsDir(agents).sort((a, b) => reads(a) - reads(b));
+  const linked: LinkGroup[] = [];
+  for (const group of order) {
+    const provider = linked.find((p) => group.agents.every((a) => a.alsoReads.some((r) => samePath(r, p.dir))));
+    if (provider) group.coveredBy = { dir: provider.dir, agents: provider.agents.map((a) => a.id) };
+    else linked.push(group);
+  }
+  return order;
+}
+
 export async function isAgentInstalled(agent: AgentProfile): Promise<boolean> {
   return agent.detectDir === undefined || (await isDirectory(agent.detectDir));
 }
