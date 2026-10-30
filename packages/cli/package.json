@@ -1,0 +1,20 @@
+{
+  "name": "skillsym",
+  "version": "0.0.0",
+  "description": "Keep every coding agent's skills in one hub, linked and drift-checked.",
+  "license": "MIT",
+  "type": "module",
+  "bin": {
+    "skillsym": "./dist/index.js"
+  },
+  "files": ["dist"],
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build": "tsc -p ."
+  },
+  "dependencies": {
+    "@skillsym/core": "workspace:*"
+  }
+}
