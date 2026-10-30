@@ -41,6 +41,20 @@ async function setupReplaced() {
   await makeSkill(path.join(userHome, ".claude", "skills"), "coding", { "agent.md": "edit" });
 }
 
+describe("remove asks before deleting a skill from the hub", () => {
+  it("cancels on anything but y", async () => {
+    await main(["add", await makeSkill(path.join(root, "src"), "coding"), "-a", "claude"], io());
+    expect(await main(["remove", "coding"], io(["n"]))).toBe(1);
+    expect((await fs.lstat(link())).isSymbolicLink()).toBe(true);
+  });
+
+  it("removes on y", async () => {
+    await main(["add", await makeSkill(path.join(root, "src"), "coding"), "-a", "claude"], io());
+    expect(await main(["remove", "coding"], io(["y"]))).toBe(0);
+    await expect(fs.lstat(link())).rejects.toThrow();
+  });
+});
+
 describe("sync asks about conflicts in a terminal", () => {
   it("restores the link when the user answers r", async () => {
     await setupReplaced();

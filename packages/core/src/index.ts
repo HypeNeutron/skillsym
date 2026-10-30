@@ -38,6 +38,14 @@ export {
   type SyncOptions,
 } from "./sync.js";
 export {
+  removeSkills,
+  type RemoveOptions,
+  type RemoveResult,
+  type RemoveLinkResult,
+  type RemoveOutcome,
+  type RemovedSkill,
+} from "./remove.js";
+export {
   resolveConflicts,
   choicesFor,
   defaultForkName,

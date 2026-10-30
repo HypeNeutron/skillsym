@@ -11,6 +11,7 @@ import {
   choicesFor,
   defaultForkName,
   planSync,
+  removeSkills,
   resolveConflicts,
   scanStatus,
   SkillsymError,
@@ -21,6 +22,8 @@ import {
   type ConflictDecision,
   type ConflictResolution,
   type Hub,
+  type RemoveOutcome,
+  type RemoveResult,
   type SkillInfo,
   type StatusReport,
   type SyncAction,
@@ -51,13 +54,15 @@ Commands:
   check                         Same as status, but exit 1 if anything is not synced (for CI and scripts)
   sync [--dry-run]              Make the agents' folders match the manifest; asks about conflicts
                                 (without a terminal, or with -y, conflicts are only reported)
+  remove, rm <skill...> [-a]    With -a: unassign those agents only. Without: remove from every agent
+                                and from the hub (asks first; the hub copy is moved to backups)
 
 Options:
   -a, --agent <ids>  Agents: claude, codex, cursor, universal; comma-separated or repeated; '*' = all installed
   -s, --skill <name> Skill names (alternative to positional names); '*' = all skills in the hub
   --all              All skills to all installed agents (same as -s '*' -a '*')
   --dry-run          Show what would change without changing anything
-  -y, --yes          Never ask questions (conflicts are reported and left alone)
+  -y, --yes          Never ask questions (sync conflicts are reported and left alone; remove proceeds)
   --json             Machine-readable output
   -h, --help        Show this help
   -v, --version     Show version`;
@@ -148,9 +153,51 @@ async function run(argv: string[], io: Io, json: boolean): Promise<ExitCode> {
       if (failed || resolutions.some((r) => !r.ok)) return 2;
       return resolutions.some((r) => r.choice === "skip") ? 1 : 0;
     }
+    case "remove":
+    case "rm": {
+      const skills = values.all ? ["*"] : [...rest, ...(values.skill ?? [])];
+      if (!skills.length) throw new UsageError("remove needs skill names: skillsym remove <skill...> [-a <agents>]");
+      // With -a only those agents are unassigned; without it the skill leaves the hub entirely.
+      const dropAgents = values.agent?.length ? values.agent : undefined;
+      const dryRun = Boolean(values["dry-run"]);
+      if (!dropAgents && !dryRun && !values.yes) {
+        const what = skills.includes("*") ? "every skill" : skills.map((s) => `"${s}"`).join(", ");
+        if (!(io.interactive && io.ask && !json)) {
+          throw new UsageError(`Removing ${what} from the hub needs confirmation: add -y (a backup is kept), or use -a to unassign agents only.`);
+        }
+        const answer = (await io.ask(`Remove ${what} from the hub and every agent? A backup is kept. [y/N] `)).trim().toLowerCase();
+        if (answer !== "y" && answer !== "yes") {
+          io.stdout("Cancelled; nothing changed.");
+          return 1;
+        }
+      }
+      const result = await removeSkills(hub, { skills, ...(dropAgents ? { agents: dropAgents } : {}), profiles, dryRun });
+      if (json) io.stdout(JSON.stringify({ dryRun, ...result }));
+      else io.stdout(formatRemove(result, dryRun));
+      return 0;
+    }
     default:
       throw new UsageError(`Unknown command "${command}".\n\n${USAGE}`);
   }
+}
+
+const REMOVE_TEXT: Record<RemoveOutcome, [string, string]> = {
+  unlinked: ["would unlink", "unlinked"],
+  "kept-shared": ["would keep shared link", "kept shared link"],
+  "left-in-place": ["would leave (not skillsym's)", "left in place (not skillsym's)"],
+  "not-linked": ["no link", "no link"],
+  "not-assigned": ["not assigned", "not assigned"],
+};
+
+function formatRemove(result: RemoveResult, dryRun: boolean): string {
+  const lines = result.links.map((l) => {
+    const who = l.agents.length ? l.agents.join(", ") : "(unassigned)";
+    return `${REMOVE_TEXT[l.outcome][dryRun ? 0 : 1]}  ${l.skill} -> ${who}${l.path ? `  (${l.path})` : ""}`;
+  });
+  for (const r of result.removedSkills) {
+    lines.push(dryRun ? `would remove "${r.skill}" from the hub (backed up)` : `removed "${r.skill}" from the hub${r.backup ? `; backup: ${r.backup}` : ""}`);
+  }
+  return lines.length ? lines.join("\n") : "Nothing to remove.";
 }
 
 function parseCommandLine(argv: string[]) {

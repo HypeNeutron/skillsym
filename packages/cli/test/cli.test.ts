@@ -179,6 +179,24 @@ describe("skillsym CLI", () => {
     await expect(fs.lstat(link)).rejects.toThrow();
   });
 
+  it("remove -a unassigns; full remove needs -y without a terminal", async () => {
+    run(["add", await makeSkill(path.join(root, "src"), "coding"), "-a", "claude,cursor"]);
+
+    const partial = run(["remove", "coding", "-a", "cursor", "--json"]);
+    expect(partial.code).toBe(0);
+    expect(JSON.parse(partial.stdout).links[0].outcome).toBe("unlinked");
+
+    const refused = run(["rm", "coding"]);
+    expect(refused.code).toBe(2);
+    expect(refused.stderr).toContain("-y");
+    expect(JSON.parse(run(["ls", "--json"]).stdout).skills.map((s: { name: string }) => s.name)).toEqual(["coding"]);
+
+    const removed = run(["rm", "coding", "-y", "--json"]);
+    expect(removed.code).toBe(0);
+    expect(JSON.parse(removed.stdout).removedSkills[0].skill).toBe("coding");
+    expect(JSON.parse(run(["ls", "--json"]).stdout).skills).toEqual([]);
+  });
+
   it("serializes concurrent adds from separate processes", async () => {
     const names = ["a1", "a2", "a3", "a4"];
     const srcs = await Promise.all(names.map((n) => makeSkill(path.join(root, "src"), n)));
