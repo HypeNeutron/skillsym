@@ -6,9 +6,11 @@ import {
   listSkills,
   openHub,
   resolveHubHome,
+  scanStatus,
   SkillsymError,
   type AgentLinkResult,
   type SkillInfo,
+  type StatusReport,
 } from "@skillsym/core";
 
 /** 0 = success / no drift, 1 = drift or unresolved conflict, 2 = usage error or failure. */
@@ -26,6 +28,8 @@ Commands:
   add <path> [-a <agents>]      Copy a skill folder (with SKILL.md) into the hub, optionally assign it
   assign <skill...> -a <agents> Link hub skills into agents' skills folders
   list, ls                      List skills in the hub and their agents
+  status                        Show every link's state: synced, missing, dangling, replaced, blocked, orphaned
+  check                         Same as status, but exit 1 if anything is not synced (for CI and scripts)
 
 Options:
   -a, --agent <ids>  Agents: claude, codex, cursor, universal; comma-separated or repeated; '*' = all installed
@@ -91,6 +95,14 @@ async function run(argv: string[], io: Io, json: boolean): Promise<ExitCode> {
       else io.stdout(formatList(skills));
       return 0;
     }
+    case "status":
+    case "check": {
+      if (rest.length) throw new UsageError(`${command} takes no arguments`);
+      const report = await scanStatus(hub);
+      if (json) io.stdout(JSON.stringify(report));
+      else io.stdout(formatStatus(report));
+      return command === "check" && !report.clean ? 1 : 0;
+    }
     default:
       throw new UsageError(`Unknown command "${command}".\n\n${USAGE}`);
   }
@@ -137,6 +149,38 @@ function formatLinks(results: AgentLinkResult[]): string {
       return r.reason ? `${line}\n                ${r.reason}` : line;
     })
     .join("\n");
+}
+
+const STATUS_HINT: Record<StatusReport["entries"][number]["status"], string> = {
+  synced: "",
+  missing: "nothing at this path; `skillsym sync` will link it",
+  dangling: "link points to a hub location that no longer exists; `skillsym sync` will re-link it",
+  replaced: "skillsym's link was replaced",
+  blocked: "occupied by something skillsym did not create; use `skillsym import`",
+  orphaned: "no longer assigned in the manifest; `skillsym sync` will remove the link",
+};
+
+function formatStatus(report: StatusReport): string {
+  const lines: string[] = [];
+  if (!report.entries.length) lines.push("No skills assigned yet. Assign one with: skillsym assign <skill> -a <agents>");
+  for (const e of report.entries) {
+    const label = e.status === "synced" ? "synced  " : e.status.toUpperCase().padEnd(8);
+    const who = e.agents.length ? e.agents.join(", ") : "(unassigned)";
+    let hint = STATUS_HINT[e.status];
+    if (e.status === "replaced") hint += e.sameContent ? " by an identical copy; `skillsym sync` will re-link it" : " by different content; `skillsym sync` will ask";
+    lines.push(`${label}  ${e.skill} -> ${who}  (${e.path})${hint ? `\n          ${hint}` : ""}`);
+  }
+  for (const u of report.unmanaged) {
+    lines.push(`unmanaged ${u.name} in ${u.agents.join(", ")}  (${u.path})  — bring it in with \`skillsym import\``);
+  }
+  for (const w of report.warnings) lines.push(`warning: ${w.message}`);
+
+  const counts = new Map<string, number>();
+  for (const e of report.entries) counts.set(e.status, (counts.get(e.status) ?? 0) + 1);
+  const summary = [...counts].map(([s, n]) => `${n} ${s}`);
+  if (report.unmanaged.length) summary.push(`${report.unmanaged.length} unmanaged`);
+  if (summary.length) lines.push("", `${summary.join(", ")}.${report.clean ? "" : " Drift found."}`);
+  return lines.join("\n");
 }
 
 /** A link we could not create is an error (2); a path occupied by something else is a conflict (1). */

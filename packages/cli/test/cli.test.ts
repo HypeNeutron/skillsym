@@ -126,6 +126,29 @@ describe("skillsym CLI", () => {
     expect(pairs).toEqual(["a:claude", "a:universal", "b:claude", "b:universal"]);
   });
 
+  it("check exits 0 when synced and 1 on drift; status always exits 0", async () => {
+    run(["add", await makeSkill(path.join(root, "src"), "coding"), "-a", "claude"]);
+    expect(run(["check"]).code).toBe(0);
+
+    const link = path.join(root, "user", ".claude", "skills", "coding");
+    try {
+      await fs.unlink(link);
+    } catch {
+      await fs.rmdir(link);
+    }
+
+    const check = run(["check", "--json"]);
+    expect(check.code).toBe(1);
+    const report = JSON.parse(check.stdout);
+    expect(report.clean).toBe(false);
+    expect(report.entries[0]).toMatchObject({ skill: "coding", status: "missing" });
+
+    const status = run(["status"]);
+    expect(status.code).toBe(0);
+    expect(status.stdout).toContain("MISSING");
+    expect(status.stdout).toContain("Drift found");
+  });
+
   it("serializes concurrent adds from separate processes", async () => {
     const names = ["a1", "a2", "a3", "a4"];
     const srcs = await Promise.all(names.map((n) => makeSkill(path.join(root, "src"), n)));

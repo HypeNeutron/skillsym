@@ -2,6 +2,7 @@ import os from "node:os";
 import path from "node:path";
 import { SkillsymError } from "./errors.js";
 import { isDirectory } from "./fsutil.js";
+import { samePath } from "./state.js";
 
 export interface AgentProfile {
   id: string;
@@ -14,6 +15,8 @@ export interface AgentProfile {
   detectDir?: string;
   /** Whether the agent picks up edits to a skill without restarting. */
   reload: "live" | "restart" | "unknown";
+  /** Entries in skillsDir the agent manages itself; skillsym never reports, imports or touches them. */
+  reserved?: string[];
 }
 
 /**
@@ -32,6 +35,8 @@ export function builtinAgents(homedir: string = os.homedir()): AgentProfile[] {
       alsoReads: [],
       detectDir: h(".claude"),
       reload: "live",
+      // Claude desktop syncs account/organization skills here.
+      reserved: ["synced"],
     },
     {
       id: "codex",
@@ -57,6 +62,17 @@ export function builtinAgents(homedir: string = os.homedir()): AgentProfile[] {
       reload: "unknown",
     },
   ];
+}
+
+/** Agents that share a skills folder (codex and universal) are served by one link. */
+export function groupBySkillsDir(agents: AgentProfile[]): { dir: string; agents: AgentProfile[] }[] {
+  const groups: { dir: string; agents: AgentProfile[] }[] = [];
+  for (const agent of agents) {
+    const group = groups.find((g) => samePath(g.dir, agent.skillsDir));
+    if (group) group.agents.push(agent);
+    else groups.push({ dir: agent.skillsDir, agents: [agent] });
+  }
+  return groups;
 }
 
 export async function isAgentInstalled(agent: AgentProfile): Promise<boolean> {

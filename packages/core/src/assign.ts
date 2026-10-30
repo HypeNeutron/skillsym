@@ -1,6 +1,6 @@
 import { promises as fs } from "node:fs";
 import path from "node:path";
-import { builtinAgents, resolveAgents, type AgentProfile } from "./agents.js";
+import { builtinAgents, groupBySkillsDir, resolveAgents, type AgentProfile } from "./agents.js";
 import { SkillsymError } from "./errors.js";
 import { pathExists } from "./fsutil.js";
 import { hashSkillDir } from "./hash.js";
@@ -113,16 +113,6 @@ export async function assignSkills(hub: Hub, options: AssignOptions): Promise<As
     },
     options.lock,
   );
-}
-
-function groupBySkillsDir(agents: AgentProfile[]): { dir: string; agents: AgentProfile[] }[] {
-  const groups: { dir: string; agents: AgentProfile[] }[] = [];
-  for (const agent of agents) {
-    const group = groups.find((g) => samePath(g.dir, agent.skillsDir));
-    if (group) group.agents.push(agent);
-    else groups.push({ dir: agent.skillsDir, agents: [agent] });
-  }
-  return groups;
 }
 
 function unique<T>(items: T[]): T[] {
