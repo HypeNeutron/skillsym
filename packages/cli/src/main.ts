@@ -1,16 +1,26 @@
 import { readFileSync } from "node:fs";
+import os from "node:os";
 import { parseArgs } from "node:util";
 import {
   addSkill,
   assignSkills,
+  builtinAgents,
   listSkills,
   openHub,
   resolveHubHome,
+  choicesFor,
+  defaultForkName,
   planSync,
+  resolveConflicts,
   scanStatus,
   SkillsymError,
   sync,
   type AgentLinkResult,
+  type AgentProfile,
+  type ConflictChoice,
+  type ConflictDecision,
+  type ConflictResolution,
+  type Hub,
   type SkillInfo,
   type StatusReport,
   type SyncAction,
@@ -25,6 +35,10 @@ export interface Io {
   stdout: (text: string) => void;
   stderr: (text: string) => void;
   env: NodeJS.ProcessEnv;
+  /** True when a person is at the terminal and can answer questions. */
+  interactive?: boolean;
+  /** Ask one question and return the typed answer. */
+  ask?: (question: string) => Promise<string>;
 }
 
 const USAGE = `Usage: skillsym <command> [options]
@@ -35,13 +49,15 @@ Commands:
   list, ls                      List skills in the hub and their agents
   status                        Show every link's state: synced, missing, dangling, replaced, blocked, orphaned
   check                         Same as status, but exit 1 if anything is not synced (for CI and scripts)
-  sync [--dry-run]              Make the agents' folders match the manifest; conflicts are reported, not touched
+  sync [--dry-run]              Make the agents' folders match the manifest; asks about conflicts
+                                (without a terminal, or with -y, conflicts are only reported)
 
 Options:
   -a, --agent <ids>  Agents: claude, codex, cursor, universal; comma-separated or repeated; '*' = all installed
   -s, --skill <name> Skill names (alternative to positional names); '*' = all skills in the hub
   --all              All skills to all installed agents (same as -s '*' -a '*')
   --dry-run          Show what would change without changing anything
+  -y, --yes          Never ask questions (conflicts are reported and left alone)
   --json             Machine-readable output
   -h, --help        Show this help
   -v, --version     Show version`;
@@ -70,6 +86,8 @@ async function run(argv: string[], io: Io, json: boolean): Promise<ExitCode> {
   }
 
   const hub = await openHub(resolveHubHome({ env: io.env }));
+  // Agents' folders come from the env we were given, never from process-global state.
+  const profiles = builtinAgents(userHome(io.env));
   const agents = values.all ? ["*"] : (values.agent ?? []);
   switch (command) {
     case "add": {
@@ -80,7 +98,7 @@ async function run(argv: string[], io: Io, json: boolean): Promise<ExitCode> {
         else io.stdout(`Added "${skill.name}" to the hub (${skill.path}).`);
         return 0;
       }
-      const { results } = await assignSkills(hub, { skills: [skill.name], agents });
+      const { results } = await assignSkills(hub, { skills: [skill.name], agents, profiles });
       if (json) io.stdout(JSON.stringify({ added: skill, assigned: results }));
       else io.stdout(`Added "${skill.name}" to the hub (${skill.path}).\n${formatLinks(results)}`);
       return exitFor(results);
@@ -89,7 +107,7 @@ async function run(argv: string[], io: Io, json: boolean): Promise<ExitCode> {
       const skills = values.all ? ["*"] : [...rest, ...(values.skill ?? [])];
       if (!skills.length) throw new UsageError("assign needs skill names: skillsym assign <skill...> -a <agents>");
       if (!agents.length) throw new UsageError("assign needs agents: -a claude,codex (or -a '*')");
-      const { results } = await assignSkills(hub, { skills, agents });
+      const { results } = await assignSkills(hub, { skills, agents, profiles });
       if (json) io.stdout(JSON.stringify({ assigned: results }));
       else io.stdout(formatLinks(results));
       return exitFor(results);
@@ -105,7 +123,7 @@ async function run(argv: string[], io: Io, json: boolean): Promise<ExitCode> {
     case "status":
     case "check": {
       if (rest.length) throw new UsageError(`${command} takes no arguments`);
-      const report = await scanStatus(hub);
+      const report = await scanStatus(hub, { profiles });
       if (json) io.stdout(JSON.stringify(report));
       else io.stdout(formatStatus(report));
       return command === "check" && !report.clean ? 1 : 0;
@@ -113,16 +131,22 @@ async function run(argv: string[], io: Io, json: boolean): Promise<ExitCode> {
     case "sync": {
       if (rest.length) throw new UsageError("sync takes no arguments");
       if (values["dry-run"]) {
-        const plan = await planSync(hub);
+        const plan = await planSync(hub, { profiles });
         if (json) io.stdout(JSON.stringify({ dryRun: true, ...plan }));
         else io.stdout(formatSync(plan.actions, plan.conflicts, true));
         return plan.conflicts.length ? 1 : 0;
       }
-      const result = await sync(hub);
+      const result = await sync(hub, { profiles });
+      const canAsk = Boolean(io.interactive && io.ask && !json && !values.yes);
       if (json) io.stdout(JSON.stringify({ dryRun: false, ...result }));
-      else io.stdout(formatSync(result.results, result.conflicts, false));
-      if (result.results.some((r) => !r.ok)) return 2;
-      return result.conflicts.length ? 1 : 0;
+      else io.stdout(formatSync(result.results, canAsk ? [] : result.conflicts, false));
+      const failed = result.results.some((r) => !r.ok);
+      if (!result.conflicts.length || !canAsk) return failed ? 2 : result.conflicts.length ? 1 : 0;
+
+      const resolutions = await askAndResolve(hub, result.conflicts, io, profiles);
+      io.stdout(formatResolutions(resolutions));
+      if (failed || resolutions.some((r) => !r.ok)) return 2;
+      return resolutions.some((r) => r.choice === "skip") ? 1 : 0;
     }
     default:
       throw new UsageError(`Unknown command "${command}".\n\n${USAGE}`);
@@ -141,6 +165,7 @@ function parseCommandLine(argv: string[]) {
         skill: { type: "string", short: "s", multiple: true },
         all: { type: "boolean" },
         "dry-run": { type: "boolean" },
+        yes: { type: "boolean", short: "y" },
         help: { type: "boolean", short: "h" },
         version: { type: "boolean", short: "v" },
       },
@@ -233,6 +258,63 @@ function formatSync(actions: (SyncAction | SyncActionResult)[], conflicts: SyncC
   return lines.join("\n");
 }
 
+const CHOICE_HELP: Record<ConflictChoice, string> = {
+  adopt: "use the agent's version as the hub version (hub version backed up)",
+  restore: "put skillsym's link back (what is there now is backed up)",
+  fork: "keep the agent's version as a new skill for this agent only",
+  drop: "accept the removal and unassign the skill from this agent",
+  skip: "decide later; change nothing",
+};
+
+const CONFLICT_TITLE: Record<SyncConflict["type"], string> = {
+  "replaced-different": "was replaced by different content",
+  "missing-owned": "link was removed",
+  blocked: "is occupied by something skillsym did not create (use `skillsym import`)",
+  "hub-skill-missing": "has no folder in the hub any more",
+};
+
+/** Ask about each conflict in turn, then apply all decisions in one locked pass. */
+async function askAndResolve(hub: Hub, conflicts: SyncConflict[], io: Io, profiles: AgentProfile[]): Promise<ConflictResolution[]> {
+  const decisions: ConflictDecision[] = [];
+  for (const c of conflicts) {
+    const choices = choicesFor(c.type);
+    io.stdout(`\n${c.skill} -> ${c.agents.join(", ")} ${CONFLICT_TITLE[c.type]}\n  ${c.path}`);
+    for (const choice of choices) io.stdout(`  [${choice[0]}] ${choice.padEnd(7)} ${CHOICE_HELP[choice]}`);
+    const choice = await askChoice(io, choices);
+    const decision: ConflictDecision = { path: c.path, choice };
+    if (choice === "fork") {
+      const suggested = defaultForkName(c);
+      const name = (await io.ask!(`  New skill name [${suggested}]: `)).trim();
+      decision.forkName = name || suggested;
+    }
+    decisions.push(decision);
+  }
+  return resolveConflicts(hub, decisions, { profiles });
+}
+
+async function askChoice(io: Io, choices: ConflictChoice[]): Promise<ConflictChoice> {
+  const prompt = `  Choose ${choices.map((c) => c[0]).join("/")} (default s): `;
+  for (;;) {
+    const answer = (await io.ask!(prompt)).trim().toLowerCase();
+    if (!answer) return "skip";
+    const match = choices.find((c) => c === answer || c[0] === answer);
+    if (match) return match;
+    io.stdout(`  Please answer one of: ${choices.join(", ")}`);
+  }
+}
+
+function formatResolutions(results: ConflictResolution[]): string {
+  const lines = results.map((r) => {
+    const skill = r.conflict?.skill ?? r.path;
+    if (!r.ok) return `FAILED  ${r.choice} ${skill}: ${r.error}`;
+    if (r.choice === "skip") return `skipped ${skill}`;
+    let line = `${r.choice.padEnd(7)} ${skill}${r.newSkill ? ` -> new skill "${r.newSkill}"` : ""}`;
+    for (const b of r.backups) line += `\n        backup: ${b}`;
+    return line;
+  });
+  return ["", ...lines].join("\n");
+}
+
 /** A link we could not create is an error (2); a path occupied by something else is a conflict (1). */
 function exitFor(results: AgentLinkResult[]): ExitCode {
   if (results.some((r) => r.outcome === "failed")) return 2;
@@ -250,6 +332,12 @@ function report(err: unknown, io: Io, json: boolean): ExitCode {
   if (json) io.stdout(JSON.stringify({ error }));
   else io.stderr(`skillsym: ${error.message}`);
   return 2;
+}
+
+/** The user's home directory as the given environment defines it (what os.homedir() reads). */
+function userHome(env: NodeJS.ProcessEnv): string {
+  const fromEnv = process.platform === "win32" ? env.USERPROFILE : env.HOME;
+  return fromEnv?.trim() || os.homedir();
 }
 
 function version(): string {

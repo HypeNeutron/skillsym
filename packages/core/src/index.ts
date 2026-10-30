@@ -38,6 +38,14 @@ export {
   type SyncOptions,
 } from "./sync.js";
 export {
+  resolveConflicts,
+  choicesFor,
+  defaultForkName,
+  type ConflictChoice,
+  type ConflictDecision,
+  type ConflictResolution,
+} from "./conflicts.js";
+export {
   assignSkills,
   type AssignOptions,
   type AssignResult,

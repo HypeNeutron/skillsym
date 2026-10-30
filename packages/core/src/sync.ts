@@ -1,6 +1,7 @@
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import { builtinAgents, type AgentProfile } from "./agents.js";
+import { moveAside } from "./backup.js";
 import { isDirectory } from "./fsutil.js";
 import { hashSkillDir } from "./hash.js";
 import type { Hub } from "./hub.js";
@@ -141,7 +142,7 @@ async function apply(hub: Hub, state: State, action: SyncAction): Promise<SyncAc
         await recordLink(state, action, target, await createDirLink(target, action.path));
         return { ...action, ok: true };
       case "replace-identical": {
-        const backup = await moveAside(hub, action);
+        const backup = await moveAside(hub, action.path, action.agents.join("+"), action.skill);
         await recordLink(state, action, target, await createDirLink(target, action.path));
         return { ...action, ok: true, ...(backup ? { backup } : {}) };
       }
@@ -161,41 +162,16 @@ async function apply(hub: Hub, state: State, action: SyncAction): Promise<SyncAc
   }
 }
 
-/**
- * Get whatever replaced our link out of the way without losing it: a link is simply removed
- * (its target is untouched); a real folder is moved into the hub's backups.
- */
-async function moveAside(hub: Hub, action: SyncAction): Promise<string | undefined> {
-  if ((await readLinkTarget(action.path)) !== null) {
-    await removeDirLink(action.path);
-    return undefined;
-  }
-  const stamp = new Date().toISOString().replace(/[:.]/g, "-");
-  const dest = path.join(hub.backupsDir, stamp, action.agents.join("+") || "unassigned", action.skill);
-  await fs.mkdir(path.dirname(dest), { recursive: true });
-  try {
-    await fs.rename(action.path, dest);
-  } catch (err) {
-    // Different volume: copy, then remove the original only after the copy succeeded.
-    if ((err as NodeJS.ErrnoException).code !== "EXDEV") throw err;
-    await fs.cp(action.path, dest, { recursive: true, errorOnExist: true });
-    await fs.rm(action.path, { recursive: true });
-  }
-  return dest;
-}
-
 async function recordLink(state: State, action: SyncAction, target: string, kind: "junction" | "symlink"): Promise<void> {
-  forget(state, action.path);
-  state.links.push({
-    path: action.path,
-    target,
-    skill: action.skill,
-    kind,
-    hash: await hashSkillDir(target),
-    createdAt: new Date().toISOString(),
-  });
+  await recordStateLink(state, action.path, action.skill, target, kind);
 }
 
-function forget(state: State, p: string): void {
+/** Replace any record at `p` with a fresh one for a link we just created. */
+export async function recordStateLink(state: State, p: string, skill: string, target: string, kind: "junction" | "symlink"): Promise<void> {
+  forget(state, p);
+  state.links.push({ path: p, target, skill, kind, hash: await hashSkillDir(target), createdAt: new Date().toISOString() });
+}
+
+export function forget(state: State, p: string): void {
   state.links = state.links.filter((l) => !samePath(l.path, p));
 }
