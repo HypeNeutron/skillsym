@@ -149,6 +149,36 @@ describe("skillsym CLI", () => {
     expect(status.stdout).toContain("Drift found");
   });
 
+  it("sync fixes what it can, --dry-run previews, conflicts exit 1", async () => {
+    run(["add", await makeSkill(path.join(root, "src"), "coding"), "-a", "claude"]);
+    const movedHome = path.join(root, "hub-moved");
+    await fs.rename(home, movedHome);
+    home = movedHome;
+
+    const preview = run(["sync", "--dry-run", "--json"]);
+    expect(preview.code).toBe(0);
+    expect(JSON.parse(preview.stdout).actions.map((a: { type: string }) => a.type)).toEqual(["relink"]);
+    expect(run(["check"]).code).toBe(1);
+
+    const applied = run(["sync"]);
+    expect(applied.code).toBe(0);
+    expect(applied.stdout).toContain("re-linked");
+    expect(run(["check"]).code).toBe(0);
+    expect(run(["sync"]).stdout).toBe("Already in sync.");
+
+    // Our link deleted by someone else: sync reports it and does not recreate it.
+    const link = path.join(root, "user", ".claude", "skills", "coding");
+    try {
+      await fs.unlink(link);
+    } catch {
+      await fs.rmdir(link);
+    }
+    const conflict = run(["sync", "--json"]);
+    expect(conflict.code).toBe(1);
+    expect(JSON.parse(conflict.stdout).conflicts[0].type).toBe("missing-owned");
+    await expect(fs.lstat(link)).rejects.toThrow();
+  });
+
   it("serializes concurrent adds from separate processes", async () => {
     const names = ["a1", "a2", "a3", "a4"];
     const srcs = await Promise.all(names.map((n) => makeSkill(path.join(root, "src"), n)));

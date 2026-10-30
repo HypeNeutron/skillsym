@@ -6,11 +6,16 @@ import {
   listSkills,
   openHub,
   resolveHubHome,
+  planSync,
   scanStatus,
   SkillsymError,
+  sync,
   type AgentLinkResult,
   type SkillInfo,
   type StatusReport,
+  type SyncAction,
+  type SyncActionResult,
+  type SyncConflict,
 } from "@skillsym/core";
 
 /** 0 = success / no drift, 1 = drift or unresolved conflict, 2 = usage error or failure. */
@@ -30,11 +35,13 @@ Commands:
   list, ls                      List skills in the hub and their agents
   status                        Show every link's state: synced, missing, dangling, replaced, blocked, orphaned
   check                         Same as status, but exit 1 if anything is not synced (for CI and scripts)
+  sync [--dry-run]              Make the agents' folders match the manifest; conflicts are reported, not touched
 
 Options:
   -a, --agent <ids>  Agents: claude, codex, cursor, universal; comma-separated or repeated; '*' = all installed
   -s, --skill <name> Skill names (alternative to positional names); '*' = all skills in the hub
   --all              All skills to all installed agents (same as -s '*' -a '*')
+  --dry-run          Show what would change without changing anything
   --json             Machine-readable output
   -h, --help        Show this help
   -v, --version     Show version`;
@@ -103,6 +110,20 @@ async function run(argv: string[], io: Io, json: boolean): Promise<ExitCode> {
       else io.stdout(formatStatus(report));
       return command === "check" && !report.clean ? 1 : 0;
     }
+    case "sync": {
+      if (rest.length) throw new UsageError("sync takes no arguments");
+      if (values["dry-run"]) {
+        const plan = await planSync(hub);
+        if (json) io.stdout(JSON.stringify({ dryRun: true, ...plan }));
+        else io.stdout(formatSync(plan.actions, plan.conflicts, true));
+        return plan.conflicts.length ? 1 : 0;
+      }
+      const result = await sync(hub);
+      if (json) io.stdout(JSON.stringify({ dryRun: false, ...result }));
+      else io.stdout(formatSync(result.results, result.conflicts, false));
+      if (result.results.some((r) => !r.ok)) return 2;
+      return result.conflicts.length ? 1 : 0;
+    }
     default:
       throw new UsageError(`Unknown command "${command}".\n\n${USAGE}`);
   }
@@ -119,6 +140,7 @@ function parseCommandLine(argv: string[]) {
         agent: { type: "string", short: "a", multiple: true },
         skill: { type: "string", short: "s", multiple: true },
         all: { type: "boolean" },
+        "dry-run": { type: "boolean" },
         help: { type: "boolean", short: "h" },
         version: { type: "boolean", short: "v" },
       },
@@ -180,6 +202,34 @@ function formatStatus(report: StatusReport): string {
   const summary = [...counts].map(([s, n]) => `${n} ${s}`);
   if (report.unmanaged.length) summary.push(`${report.unmanaged.length} unmanaged`);
   if (summary.length) lines.push("", `${summary.join(", ")}.${report.clean ? "" : " Drift found."}`);
+  return lines.join("\n");
+}
+
+const ACTION_TEXT: Record<SyncAction["type"], [string, string]> = {
+  link: ["would link", "linked"],
+  relink: ["would re-link", "re-linked"],
+  "replace-identical": ["would restore link over identical copy", "restored link over identical copy"],
+  "unlink-orphan": ["would remove unassigned link", "removed unassigned link"],
+  forget: ["would stop tracking", "stopped tracking"],
+  record: ["would record existing link", "recorded existing link"],
+};
+
+function formatSync(actions: (SyncAction | SyncActionResult)[], conflicts: SyncConflict[], dryRun: boolean): string {
+  const lines: string[] = [];
+  for (const a of actions) {
+    const failed = "ok" in a && !a.ok;
+    const verb = failed ? "FAILED" : ACTION_TEXT[a.type][dryRun ? 0 : 1];
+    const who = a.agents.length ? a.agents.join(", ") : "(unassigned)";
+    let line = `${verb}  ${a.skill} -> ${who}  (${a.path})`;
+    if ("backup" in a && a.backup) line += `\n          backup: ${a.backup}`;
+    if (failed) line += `\n          ${(a as SyncActionResult).error}`;
+    lines.push(line);
+  }
+  for (const c of conflicts) {
+    lines.push(`CONFLICT  ${c.skill} -> ${c.agents.join(", ") || "(unassigned)"}  (${c.path})\n          ${c.message}`);
+  }
+  if (!actions.length && !conflicts.length) return "Already in sync.";
+  if (conflicts.length) lines.push("", `${conflicts.length} conflict(s) left untouched.`);
   return lines.join("\n");
 }
 

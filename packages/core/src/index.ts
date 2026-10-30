@@ -24,7 +24,19 @@ export {
   type StatusWarning,
   type ScanOptions,
 } from "./status.js";
-export { readLinkTarget } from "./links.js";
+export { readLinkTarget, removeDirLink } from "./links.js";
+export {
+  planSync,
+  sync,
+  type SyncPlan,
+  type SyncResult,
+  type SyncAction,
+  type SyncActionType,
+  type SyncActionResult,
+  type SyncConflict,
+  type SyncConflictType,
+  type SyncOptions,
+} from "./sync.js";
 export {
   assignSkills,
   type AssignOptions,
