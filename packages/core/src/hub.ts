@@ -12,6 +12,8 @@ export interface Hub {
   /** Scratch space for staging copies before they are renamed into place. */
   tmpDir: string;
   manifestPath: string;
+  /** Record of every link skillsym created. */
+  statePath: string;
   lockPath: string;
 }
 
@@ -34,6 +36,7 @@ export function hubPaths(home: string): Hub {
     backupsDir: path.join(home, "backups"),
     tmpDir: path.join(home, ".tmp"),
     manifestPath: path.join(home, "manifest.json"),
+    statePath: path.join(home, "state.json"),
     lockPath: path.join(home, ".lock"),
   };
 }

@@ -20,8 +20,10 @@ afterEach(async () => {
   await removeDir(root);
 });
 
+/** Agents' folders resolve from the user's home dir, so point it at the temp dir too. */
 function env() {
-  return { ...process.env, SKILLSYM_HOME: home };
+  const userHome = path.join(root, "user");
+  return { ...process.env, SKILLSYM_HOME: home, HOME: userHome, USERPROFILE: userHome };
 }
 
 function run(args: string[]) {
@@ -83,6 +85,45 @@ describe("skillsym CLI", () => {
     const r = run(["--version"]);
     expect(r.code).toBe(0);
     expect(r.stdout).toMatch(/^\d+\.\d+\.\d+/);
+  });
+
+  it("assign links a skill and list shows the agent", async () => {
+    run(["add", await makeSkill(path.join(root, "src"), "coding")]);
+    const r = run(["assign", "coding", "-a", "claude", "--json"]);
+    expect(r.code).toBe(0);
+    expect(JSON.parse(r.stdout).assigned).toEqual([
+      { skill: "coding", agents: ["claude"], path: path.join(root, "user", ".claude", "skills", "coding"), outcome: "linked" },
+    ]);
+    expect(JSON.parse(run(["ls", "--json"]).stdout).skills[0].agents).toEqual(["claude"]);
+  });
+
+  it("add -a adds and assigns in one step", async () => {
+    const r = run(["add", await makeSkill(path.join(root, "src"), "coding"), "-a", "claude", "-a", "cursor", "--json"]);
+    expect(r.code).toBe(0);
+    expect(JSON.parse(r.stdout).assigned.map((x: { agents: string[] }) => x.agents[0])).toEqual(["claude", "cursor"]);
+  });
+
+  it("assign exits 1 when a target path is occupied", async () => {
+    run(["add", await makeSkill(path.join(root, "src"), "coding")]);
+    await makeSkill(path.join(root, "user", ".claude", "skills"), "coding");
+    const r = run(["assign", "coding", "-a", "claude", "--json"]);
+    expect(r.code).toBe(1);
+    expect(JSON.parse(r.stdout).assigned[0].outcome).toBe("blocked");
+  });
+
+  it("assign without agents is a usage error", async () => {
+    run(["add", await makeSkill(path.join(root, "src"), "coding")]);
+    expect(run(["assign", "coding"]).code).toBe(2);
+  });
+
+  it("--all assigns every skill to every installed agent", async () => {
+    await fs.mkdir(path.join(root, "user", ".claude"), { recursive: true });
+    run(["add", await makeSkill(path.join(root, "src"), "a")]);
+    run(["add", await makeSkill(path.join(root, "src"), "b")]);
+    const r = run(["assign", "--all", "--json"]);
+    expect(r.code).toBe(0);
+    const pairs = JSON.parse(r.stdout).assigned.map((x: { skill: string; agents: string[] }) => `${x.skill}:${x.agents.join("+")}`);
+    expect(pairs).toEqual(["a:claude", "a:universal", "b:claude", "b:universal"]);
   });
 
   it("serializes concurrent adds from separate processes", async () => {

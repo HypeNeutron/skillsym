@@ -1,6 +1,15 @@
 import { readFileSync } from "node:fs";
 import { parseArgs } from "node:util";
-import { addSkill, listSkills, openHub, resolveHubHome, SkillsymError, type SkillInfo } from "@skillsym/core";
+import {
+  addSkill,
+  assignSkills,
+  listSkills,
+  openHub,
+  resolveHubHome,
+  SkillsymError,
+  type AgentLinkResult,
+  type SkillInfo,
+} from "@skillsym/core";
 
 /** 0 = success / no drift, 1 = drift or unresolved conflict, 2 = usage error or failure. */
 export type ExitCode = 0 | 1 | 2;
@@ -14,11 +23,15 @@ export interface Io {
 const USAGE = `Usage: skillsym <command> [options]
 
 Commands:
-  add <path>        Copy a skill folder (with SKILL.md) into the hub
-  list, ls          List skills in the hub
+  add <path> [-a <agents>]      Copy a skill folder (with SKILL.md) into the hub, optionally assign it
+  assign <skill...> -a <agents> Link hub skills into agents' skills folders
+  list, ls                      List skills in the hub and their agents
 
 Options:
-  --json            Machine-readable output
+  -a, --agent <ids>  Agents: claude, codex, cursor, universal; comma-separated or repeated; '*' = all installed
+  -s, --skill <name> Skill names (alternative to positional names); '*' = all skills in the hub
+  --all              All skills to all installed agents (same as -s '*' -a '*')
+  --json             Machine-readable output
   -h, --help        Show this help
   -v, --version     Show version`;
 
@@ -46,13 +59,29 @@ async function run(argv: string[], io: Io, json: boolean): Promise<ExitCode> {
   }
 
   const hub = await openHub(resolveHubHome({ env: io.env }));
+  const agents = values.all ? ["*"] : (values.agent ?? []);
   switch (command) {
     case "add": {
-      if (rest.length !== 1) throw new UsageError("add takes exactly one path: skillsym add <path>");
+      if (rest.length !== 1) throw new UsageError("add takes exactly one path: skillsym add <path> [-a <agents>]");
       const skill = await addSkill(hub, rest[0]!);
-      if (json) io.stdout(JSON.stringify({ added: skill }));
-      else io.stdout(`Added "${skill.name}" to the hub (${skill.path}).`);
-      return 0;
+      if (!agents.length) {
+        if (json) io.stdout(JSON.stringify({ added: skill }));
+        else io.stdout(`Added "${skill.name}" to the hub (${skill.path}).`);
+        return 0;
+      }
+      const { results } = await assignSkills(hub, { skills: [skill.name], agents });
+      if (json) io.stdout(JSON.stringify({ added: skill, assigned: results }));
+      else io.stdout(`Added "${skill.name}" to the hub (${skill.path}).\n${formatLinks(results)}`);
+      return exitFor(results);
+    }
+    case "assign": {
+      const skills = values.all ? ["*"] : [...rest, ...(values.skill ?? [])];
+      if (!skills.length) throw new UsageError("assign needs skill names: skillsym assign <skill...> -a <agents>");
+      if (!agents.length) throw new UsageError("assign needs agents: -a claude,codex (or -a '*')");
+      const { results } = await assignSkills(hub, { skills, agents });
+      if (json) io.stdout(JSON.stringify({ assigned: results }));
+      else io.stdout(formatLinks(results));
+      return exitFor(results);
     }
     case "list":
     case "ls": {
@@ -75,6 +104,9 @@ function parseCommandLine(argv: string[]) {
       strict: true,
       options: {
         json: { type: "boolean" },
+        agent: { type: "string", short: "a", multiple: true },
+        skill: { type: "string", short: "s", multiple: true },
+        all: { type: "boolean" },
         help: { type: "boolean", short: "h" },
         version: { type: "boolean", short: "v" },
       },
@@ -88,6 +120,30 @@ function formatList(skills: SkillInfo[]): string {
   if (!skills.length) return "No skills in the hub yet. Add one with: skillsym add <path>";
   const width = Math.max(...skills.map((s) => s.name.length));
   return skills.map((s) => `${s.name.padEnd(width)}  ${s.agents.length ? s.agents.join(", ") : "(not assigned)"}`).join("\n");
+}
+
+const OUTCOME_MARK: Record<AgentLinkResult["outcome"], string> = {
+  linked: "linked        ",
+  "already-linked": "already linked",
+  blocked: "BLOCKED       ",
+  failed: "FAILED        ",
+};
+
+function formatLinks(results: AgentLinkResult[]): string {
+  if (!results.length) return "Nothing to assign.";
+  return results
+    .map((r) => {
+      const line = `${OUTCOME_MARK[r.outcome]}  ${r.skill} -> ${r.agents.join(", ")}  (${r.path})`;
+      return r.reason ? `${line}\n                ${r.reason}` : line;
+    })
+    .join("\n");
+}
+
+/** A link we could not create is an error (2); a path occupied by something else is a conflict (1). */
+function exitFor(results: AgentLinkResult[]): ExitCode {
+  if (results.some((r) => r.outcome === "failed")) return 2;
+  if (results.some((r) => r.outcome === "blocked")) return 1;
+  return 0;
 }
 
 function report(err: unknown, io: Io, json: boolean): ExitCode {

@@ -5,7 +5,11 @@ export type ErrorCode =
   | "INVALID_SKILL_NAME"
   | "MANIFEST_CORRUPT"
   | "UNSUPPORTED_MANIFEST_VERSION"
-  | "LOCK_TIMEOUT";
+  | "LOCK_TIMEOUT"
+  | "UNKNOWN_AGENT"
+  | "SKILL_NOT_IN_HUB"
+  | "STATE_CORRUPT"
+  | "UNSUPPORTED_STATE_VERSION";
 
 /** Every failure core reports to callers. Callers map it to output and exit codes. */
 export class SkillsymError extends Error {
