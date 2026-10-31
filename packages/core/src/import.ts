@@ -152,35 +152,56 @@ export async function importSkills(hub: Hub, options: ImportOptions = {}): Promi
 }
 
 async function importOne(hub: Hub, profiles: AgentProfile[], item: ImportItem, result: ImportItemResult): Promise<void> {
-  const target = path.join(hub.skillsDir, item.name);
+  if (item.type === "import") await placeInHub(hub, item.name, item.sources[0]!.path);
+  await assignInManifest(hub, item.name, item.sources.flatMap((s) => s.agents));
+  await replaceWithLinks(hub, profiles, item.name, item.sources, result);
+}
+
+/** Copy `from` into the hub as `skill` (staged, then renamed) and add a manifest entry if missing. */
+export async function placeInHub(hub: Hub, skill: string, from: string): Promise<void> {
+  const staging = path.join(hub.tmpDir, `${skill}.${randomBytes(6).toString("hex")}`);
+  await fs.cp(from, staging, { recursive: true, errorOnExist: true });
+  await fs.rename(staging, path.join(hub.skillsDir, skill));
+  const manifest = await readManifest(hub.manifestPath);
+  manifest.skills[skill] ??= { agents: [], mode: "link", scope: "user" };
+  await writeManifest(hub.manifestPath, manifest);
+}
+
+export async function assignInManifest(hub: Hub, skill: string, agents: string[]): Promise<void> {
+  const manifest = await readManifest(hub.manifestPath);
+  const entry = (manifest.skills[skill] ??= { agents: [], mode: "link", scope: "user" });
+  entry.agents = [...new Set([...entry.agents, ...agents])].sort();
+  await writeManifest(hub.manifestPath, manifest);
+}
+
+/**
+ * For each source folder (an agent's copy), back it up and put a link to hub skill `skill` in its
+ * folder, named `skill`. Agents that already see the skill through another linked folder get no
+ * link. State is written after every link, so an interruption loses nothing.
+ */
+export async function replaceWithLinks(
+  hub: Hub,
+  profiles: AgentProfile[],
+  skill: string,
+  sources: { path: string; agents: string[] }[],
+  result: { backups: string[]; linked: string[] },
+): Promise<void> {
+  const target = path.join(hub.skillsDir, skill);
   const manifest = await readManifest(hub.manifestPath);
   const state = await readState(hub.statePath);
-
-  if (item.type === "import") {
-    // Stage then rename, so the hub never holds half a skill.
-    const staging = path.join(hub.tmpDir, `${item.name}.${randomBytes(6).toString("hex")}`);
-    await fs.cp(item.sources[0]!.path, staging, { recursive: true, errorOnExist: true });
-    await fs.rename(staging, target);
-    manifest.skills[item.name] = { agents: [], mode: "link", scope: "user" };
-  }
-  const entry = manifest.skills[item.name]!;
-  entry.agents = [...new Set([...entry.agents, ...item.sources.flatMap((s) => s.agents)])].sort();
-  await writeManifest(hub.manifestPath, manifest);
-
-  // Replace each copy, linking only where the agent does not already see the skill elsewhere.
-  const assigned = profiles.filter((p) => entry.agents.includes(p.id));
+  const assigned = profiles.filter((p) => manifest.skills[skill]?.agents.includes(p.id));
   const healthy: string[] = [];
   for (const group of planLinkGroups(assigned)) {
-    const linkPath = path.join(group.dir, item.name);
-    const source = item.sources.find((s) => samePath(s.path, linkPath));
+    const linkPath = path.join(group.dir, skill);
+    const source = sources.find((s) => samePath(path.dirname(s.path), group.dir));
     if (!source) {
       const onDisk = await readLinkTarget(linkPath);
       if (onDisk && samePath(onDisk, target)) healthy.push(group.dir);
       continue;
     }
-    result.backups.push(await moveToBackup(hub, source.path, `import-${source.agents.join("+")}`, item.name));
+    result.backups.push(await moveToBackup(hub, source.path, `import-${source.agents.join("+")}`, path.basename(source.path)));
     if (group.coveredBy && healthy.some((d) => samePath(d, group.coveredBy!.dir))) continue;
-    await recordStateLink(state, linkPath, item.name, target, await createDirLink(target, linkPath));
+    await recordStateLink(state, linkPath, skill, target, await createDirLink(target, linkPath));
     await writeState(hub.statePath, state);
     result.linked.push(linkPath);
     healthy.push(group.dir);

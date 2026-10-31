@@ -10,7 +10,11 @@ export type ErrorCode =
   | "SKILL_NOT_IN_HUB"
   | "STATE_CORRUPT"
   | "UNSUPPORTED_STATE_VERSION"
-  | "CONFIG_INVALID";
+  | "CONFIG_INVALID"
+  | "IMPORT_PENDING"
+  | "NO_PENDING_IMPORT"
+  | "MERGE_UNRESOLVED"
+  | "IMPORT_SOURCE_CHANGED";
 
 /** Every failure core reports to callers. Callers map it to output and exit codes. */
 export class SkillsymError extends Error {

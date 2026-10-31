@@ -1,3 +1,4 @@
+import { spawn } from "node:child_process";
 import { readFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -10,10 +11,16 @@ import {
   openHub,
   resolveHubHome,
   choicesFor,
+  isValidSkillName,
   defaultForkName,
   planSync,
   planImport,
   importSkills,
+  importVersions,
+  resolveImportConflicts,
+  continueImport,
+  abortImport,
+  readPendingImport,
   removeSkills,
   resolveConflicts,
   scanStatus,
@@ -25,6 +32,10 @@ import {
   type ConflictDecision,
   type ConflictResolution,
   type Hub,
+  type BinaryConflict,
+  type ImportChoice,
+  type ImportDecision,
+  type ImportDecisionResult,
   type ImportItem,
   type ImportItemResult,
   type RemoveOutcome,
@@ -45,9 +56,19 @@ export interface Io {
   env: NodeJS.ProcessEnv;
   /** True when a person is at the terminal and can answer questions. */
   interactive?: boolean;
-  /** Ask one question and return the typed answer. */
+  /** Ask one question and return the typed answer. Rejects with PromptCancelled on Ctrl+C or end of input. */
   ask?: (question: string) => Promise<string>;
 }
+
+/** The user pressed Ctrl+C (or input ended) at a question: nothing they answered is applied. */
+export class PromptCancelled extends Error {
+  constructor() {
+    super("cancelled");
+    this.name = "PromptCancelled";
+  }
+}
+
+const PROMPT_KEYS = "Enter = skip · q = skip all the rest · Ctrl+C = cancel without applying any answer";
 
 const USAGE = `Usage: skillsym <command> [options]
 
@@ -60,7 +81,8 @@ Commands:
   sync [--dry-run]              Make the agents' folders match the manifest; asks about conflicts
                                 (without a terminal, or with -y, conflicts are only reported)
   import [--dry-run]            Bring skills already in agents' folders into the hub (originals backed up,
-                                replaced by links); copies that differ are reported as conflicts
+                                replaced by links); copies that differ: choose one, keep both, or merge
+  import --continue | --abort   Finish or drop an open merge
   remove, rm <skill...> [-a]    With -a: unassign those agents only. Without: remove from every agent
                                 and from the hub (asks first; the hub copy is moved to backups)
 
@@ -69,7 +91,7 @@ Options:
   -s, --skill <name> Skill names (alternative to positional names); '*' = all skills in the hub
   --all              All skills to all installed agents (same as -s '*' -a '*')
   --dry-run          Show what would change without changing anything
-  -y, --yes          Never ask questions (sync conflicts are reported and left alone; remove proceeds)
+  -y, --yes          Never ask questions: sync/import conflicts are reported and left alone; remove proceeds
   --json             Machine-readable output
   -h, --help        Show this help
   -v, --version     Show version`;
@@ -81,6 +103,10 @@ export async function main(argv: string[], io: Io): Promise<ExitCode> {
   try {
     return await run(argv, io, json);
   } catch (err) {
+    if (err instanceof PromptCancelled) {
+      io.stdout("\nCancelled. None of your answers were applied; run the command again when you are ready to decide.");
+      return 1;
+    }
     return report(err, io, json);
   }
 }
@@ -101,6 +127,12 @@ async function run(argv: string[], io: Io, json: boolean): Promise<ExitCode> {
   // Agents' folders come from the env we were given, never from process-global state.
   const profiles = await loadProfiles(hub, userHome(io.env));
   const agents = values.all ? ["*"] : (values.agent ?? []);
+  const writes = ["add", "assign", "sync", "remove", "rm", "import"].includes(command) && !values["dry-run"];
+  const showsPending = writes || command === "status" || command === "check";
+  if (showsPending && !(command === "import" && (values.continue || values.abort))) {
+    const pending = await readPendingImport(hub);
+    if (pending) io.stderr(`warning: a merge of "${pending.skill}" is still open in ${pending.mergeDir}; finish it with \`skillsym import --continue\` or drop it with \`--abort\`.`);
+  }
   switch (command) {
     case "add": {
       if (rest.length !== 1) throw new UsageError("add takes exactly one path: skillsym add <path> [-a <agents>]");
@@ -157,11 +189,25 @@ async function run(argv: string[], io: Io, json: boolean): Promise<ExitCode> {
 
       const resolutions = await askAndResolve(hub, result.conflicts, io, profiles);
       io.stdout(formatResolutions(resolutions));
+      if (resolutions.some((r) => r.choice === "skip")) io.stdout("\nSkipped conflicts are unchanged. Run `skillsym sync` again whenever you want to decide them.");
       if (failed || resolutions.some((r) => !r.ok)) return 2;
       return resolutions.some((r) => r.choice === "skip") ? 1 : 0;
     }
     case "import": {
       if (rest.length) throw new UsageError("import takes no arguments; it scans every agent's skills folder");
+      if (values.continue && values.abort) throw new UsageError("use either --continue or --abort, not both");
+      if (values.continue) {
+        const done = await continueImport(hub, { profiles });
+        if (json) io.stdout(JSON.stringify({ continued: done }));
+        else io.stdout(`Merge of "${done.name}" finished: it is now the hub version, and every agent links to it.${formatImportDecisions([done])}`);
+        return 0;
+      }
+      if (values.abort) {
+        const { skill } = await abortImport(hub);
+        if (json) io.stdout(JSON.stringify({ aborted: skill }));
+        else io.stdout(`Aborted the merge of "${skill}". The agents' copies were never changed.`);
+        return 0;
+      }
       if (values["dry-run"]) {
         const plan = await planImport(hub, { profiles });
         if (json) io.stdout(JSON.stringify({ dryRun: true, ...plan }));
@@ -169,10 +215,28 @@ async function run(argv: string[], io: Io, json: boolean): Promise<ExitCode> {
         return plan.items.some((i) => i.type === "conflict") ? 1 : 0;
       }
       const result = await importSkills(hub, { profiles });
+      const conflicts = result.items.filter((i) => i.type === "conflict");
+      const canAsk = Boolean(io.interactive && io.ask && !json && !values.yes);
       if (json) io.stdout(JSON.stringify({ dryRun: false, ...result }));
-      else io.stdout(formatImport(result.items, false));
-      if (result.items.some((i) => !i.ok)) return 2;
-      return result.items.some((i) => i.type === "conflict") ? 1 : 0;
+      else {
+        io.stdout(formatImport(canAsk ? result.items.filter((i) => i.type !== "conflict") : result.items, false));
+        if (conflicts.length && !canAsk) {
+          io.stdout(
+            `\n${conflicts.length} skill(s) have differing copies and were left untouched. ` +
+              "Run `skillsym import` in a terminal (without -y) to choose for each: keep one version, keep both, or merge.",
+          );
+        }
+      }
+      const failed = result.items.some((i) => !i.ok);
+      if (!conflicts.length || !canAsk) return failed ? 2 : conflicts.length ? 1 : 0;
+
+      const decisions = await askImportDecisions(hub, conflicts, io);
+      const resolved = await resolveImportConflicts(hub, decisions, { profiles });
+      io.stdout(formatImportDecisions(resolved));
+      for (const r of resolved) if (r.mergeDir && openEditor(io, r.mergeDir)) io.stdout(`          (opened ${r.mergeDir} in your editor)`);
+      if (resolved.some((r) => r.choice === "skip")) io.stdout("\nSkipped skills are unchanged. Run `skillsym import` again whenever you want to decide them.");
+      if (failed || resolved.some((r) => !r.ok)) return 2;
+      return resolved.some((r) => r.choice === "skip" || r.choice === "merge") ? 1 : 0;
     }
     case "remove":
     case "rm": {
@@ -186,7 +250,7 @@ async function run(argv: string[], io: Io, json: boolean): Promise<ExitCode> {
         if (!(io.interactive && io.ask && !json)) {
           throw new UsageError(`Removing ${what} from the hub needs confirmation: add -y (a backup is kept), or use -a to unassign agents only.`);
         }
-        const answer = (await io.ask(`Remove ${what} from the hub and every agent? A backup is kept. [y/N] `)).trim().toLowerCase();
+        const answer = (await io.ask(`Remove ${what} from the hub and every agent? A backup is kept. [y/N] (Enter = no) `)).trim().toLowerCase();
         if (answer !== "y" && answer !== "yes") {
           io.stdout("Cancelled; nothing changed.");
           return 1;
@@ -199,6 +263,120 @@ async function run(argv: string[], io: Io, json: boolean): Promise<ExitCode> {
     }
     default:
       throw new UsageError(`Unknown command "${command}".\n\n${USAGE}`);
+  }
+}
+
+const IMPORT_CHOICE_HELP: Record<ImportChoice, string> = {
+  primary: "keep one version; the others are backed up and replaced by links to it",
+  "keep-both": "keep every version as its own skill (e.g. research and research-codex)",
+  merge: "write a merge with conflict markers to edit, then run `skillsym import --continue`",
+  skip: "decide later; change nothing",
+};
+
+async function askImportDecisions(hub: Hub, conflicts: ImportItem[], io: Io): Promise<ImportDecision[]> {
+  const decisions: ImportDecision[] = [];
+  let merging = Boolean(await readPendingImport(hub));
+  let quit = false;
+  for (const item of conflicts) {
+    if (quit) {
+      decisions.push({ name: item.name, choice: "skip" });
+      continue;
+    }
+    const versions = await importVersions(hub, item);
+    io.stdout(`\n${item.name}: ${item.reason}`);
+    versions.forEach((v, i) => io.stdout(`  ${i + 1}) ${v.label.padEnd(10)} ${v.path}`));
+    // Only one merge can be open at a time.
+    const choices: ImportChoice[] = merging ? ["primary", "keep-both", "skip"] : ["primary", "keep-both", "merge", "skip"];
+    for (const c of choices) io.stdout(`  [${c[0]}] ${c.padEnd(9)} ${IMPORT_CHOICE_HELP[c]}`);
+    if (merging) io.stdout("  (merge is not offered: another merge is already open)");
+    const answer = await askOne(io, choices);
+    if (answer === "quit") {
+      quit = true;
+      decisions.push({ name: item.name, choice: "skip" });
+      continue;
+    }
+    const decision: ImportDecision = { name: item.name, choice: answer };
+    if (answer === "primary") {
+      const picked = await askNumber(io, `  Keep which version? 1-${versions.length} (Enter = go back and skip this skill): `, versions.length);
+      if (picked === null) decision.choice = "skip";
+      else decision.primary = versions[picked - 1]!.path;
+    }
+    if (decision.choice === "merge") merging = true;
+    decisions.push(decision);
+  }
+  return decisions;
+}
+
+/** Ask for one of `choices` (or its first letter). Enter = skip, q = skip all the rest. */
+async function askOne<T extends string>(io: Io, choices: T[]): Promise<T | "quit"> {
+  io.stdout(`  (${PROMPT_KEYS})`);
+  const prompt = `  Choose ${choices.map((c) => c[0]).join("/")}: `;
+  for (;;) {
+    const answer = (await io.ask!(prompt)).trim().toLowerCase();
+    if (!answer) return (choices.find((c) => c === "skip") ?? choices[choices.length - 1])!;
+    if (answer === "q" || answer === "quit") return "quit";
+    const match = choices.find((c) => c === answer || c[0] === answer);
+    if (match) return match;
+    io.stdout(`  Please answer one of: ${choices.join(", ")} (or q, or Enter to skip)`);
+  }
+}
+
+/** Ask for a number from 1 to max; Enter returns null. */
+async function askNumber(io: Io, prompt: string, max: number): Promise<number | null> {
+  for (;;) {
+    const answer = (await io.ask!(prompt)).trim();
+    if (!answer) return null;
+    const n = Number(answer);
+    if (Number.isInteger(n) && n >= 1 && n <= max) return n;
+    io.stdout(`  Please answer a number from 1 to ${max}, or press Enter to skip`);
+  }
+}
+
+function formatImportDecisions(results: ImportDecisionResult[]): string {
+  const lines: string[] = [""];
+  for (const r of results) {
+    if (!r.ok) {
+      lines.push(`FAILED    ${r.choice} ${r.name}: ${r.error}`);
+      continue;
+    }
+    if (r.choice === "skip") lines.push(`skipped   ${r.name}`);
+    else if (r.mergeDir) lines.push(...mergeInstructions(r.name, r.mergeDir, r.conflictedFiles ?? [], r.binaryConflicts ?? []));
+    else {
+      lines.push(`${r.choice.padEnd(9)} ${r.name}${r.newSkills?.length ? ` (+ new skills: ${r.newSkills.join(", ")})` : ""}`);
+      for (const b of r.backups) lines.push(`          backup: ${b}`);
+    }
+  }
+  return lines.join("\n");
+}
+
+function mergeInstructions(skill: string, dir: string, conflicted: string[], binary: BinaryConflict[]): string[] {
+  const binaryFiles = new Set(binary.map((b) => b.file));
+  const text = conflicted.filter((f) => !binaryFiles.has(f));
+  const lines = [`merging   ${skill}: the merged copy is in ${dir}`];
+  if (text.length) {
+    lines.push("          1. Edit these files; between <<<<<<< and >>>>>>> keep the lines you want and delete the marker lines:");
+    for (const f of text) lines.push(`               ${f}`);
+  }
+  if (binary.length) {
+    lines.push(`          ${text.length ? 2 : 1}. These binary files differ; keep one version of each under the original name and delete the other(s):`);
+    for (const b of binary) lines.push(`               ${b.file} (now the ${b.kept} version)  vs  ${b.extras.join(", ")}`);
+  }
+  if (!text.length && !binary.length) lines.push("          The versions only differ by files that exist on one side; review the folder if you like.");
+  lines.push("          Then run `skillsym import --continue` to finish, or `skillsym import --abort` to drop the merge.");
+  lines.push("          Nothing in your agents' folders changes until you continue.");
+  return lines;
+}
+
+/** Open $EDITOR (or $VISUAL) on the merge folder without waiting for it. Returns whether it was launched. */
+function openEditor(io: Io, dir: string): boolean {
+  const editor = io.env.VISUAL || io.env.EDITOR;
+  if (!editor) return false;
+  try {
+    spawn(editor, [dir], { detached: true, stdio: "ignore", shell: true }).unref();
+    return true;
+  } catch {
+    // Opening an editor is a convenience; the printed instructions are enough.
+    return false;
   }
 }
 
@@ -264,6 +442,8 @@ function parseCommandLine(argv: string[]) {
         skill: { type: "string", short: "s", multiple: true },
         all: { type: "boolean" },
         "dry-run": { type: "boolean" },
+        continue: { type: "boolean" },
+        abort: { type: "boolean" },
         yes: { type: "boolean", short: "y" },
         help: { type: "boolean", short: "h" },
         version: { type: "boolean", short: "v" },
@@ -358,7 +538,14 @@ function formatSync(actions: (SyncAction | SyncActionResult)[], conflicts: SyncC
     lines.push(`CONFLICT  ${c.skill} -> ${c.agents.join(", ") || "(unassigned)"}  (${c.path})\n          ${c.message}`);
   }
   if (!actions.length && !conflicts.length) return "Already in sync.";
-  if (conflicts.length) lines.push("", `${conflicts.length} conflict(s) left untouched.`);
+  if (conflicts.length) {
+    lines.push(
+      "",
+      dryRun
+        ? `${conflicts.length} conflict(s) would need your decision; \`skillsym sync\` in a terminal asks about each.`
+        : `${conflicts.length} conflict(s) left untouched. Run \`skillsym sync\` in a terminal (without -y) to choose what to do for each.`,
+    );
+  }
   return lines.join("\n");
 }
 
@@ -380,31 +567,36 @@ const CONFLICT_TITLE: Record<SyncConflict["type"], string> = {
 /** Ask about each conflict in turn, then apply all decisions in one locked pass. */
 async function askAndResolve(hub: Hub, conflicts: SyncConflict[], io: Io, profiles: AgentProfile[]): Promise<ConflictResolution[]> {
   const decisions: ConflictDecision[] = [];
+  let quit = false;
   for (const c of conflicts) {
+    if (quit) {
+      decisions.push({ path: c.path, choice: "skip" });
+      continue;
+    }
     const choices = choicesFor(c.type);
     io.stdout(`\n${c.skill} -> ${c.agents.join(", ")} ${CONFLICT_TITLE[c.type]}\n  ${c.path}`);
     for (const choice of choices) io.stdout(`  [${choice[0]}] ${choice.padEnd(7)} ${CHOICE_HELP[choice]}`);
-    const choice = await askChoice(io, choices);
-    const decision: ConflictDecision = { path: c.path, choice };
-    if (choice === "fork") {
+    const answer = await askOne(io, choices);
+    if (answer === "quit") {
+      quit = true;
+      decisions.push({ path: c.path, choice: "skip" });
+      continue;
+    }
+    const decision: ConflictDecision = { path: c.path, choice: answer };
+    if (answer === "fork") {
       const suggested = defaultForkName(c);
-      const name = (await io.ask!(`  New skill name [${suggested}]: `)).trim();
-      decision.forkName = name || suggested;
+      for (;;) {
+        const name = (await io.ask!(`  New skill name [${suggested}] (Enter = use it): `)).trim() || suggested;
+        if (isValidSkillName(name)) {
+          decision.forkName = name;
+          break;
+        }
+        io.stdout('  Names may use letters, digits, ".", "_" and "-" (up to 64 characters).');
+      }
     }
     decisions.push(decision);
   }
   return resolveConflicts(hub, decisions, { profiles });
-}
-
-async function askChoice(io: Io, choices: ConflictChoice[]): Promise<ConflictChoice> {
-  const prompt = `  Choose ${choices.map((c) => c[0]).join("/")} (default s): `;
-  for (;;) {
-    const answer = (await io.ask!(prompt)).trim().toLowerCase();
-    if (!answer) return "skip";
-    const match = choices.find((c) => c === answer || c[0] === answer);
-    if (match) return match;
-    io.stdout(`  Please answer one of: ${choices.join(", ")}`);
-  }
 }
 
 function formatResolutions(results: ConflictResolution[]): string {
@@ -426,6 +618,17 @@ function exitFor(results: AgentLinkResult[]): ExitCode {
   return 0;
 }
 
+/** What the user can do next, for errors whose message does not already say. */
+const NEXT_STEP: Record<string, string> = {
+  USAGE: "Run `skillsym --help` to see the commands and options.",
+  LOCK_TIMEOUT: "Another skillsym command is running; wait for it and try again. A lock left by a crashed run is cleared automatically.",
+  CONFIG_INVALID: "Fix the file, or delete it to use only the built-in agents.",
+  UNKNOWN_AGENT: "Agents that are not built in can be added in config.json in the hub folder.",
+  SKILL_NOT_IN_HUB: "See what is in the hub with `skillsym list`.",
+  MANIFEST_CORRUPT: "Restore manifest.json from a backup, or fix the JSON by hand; skillsym will not overwrite it.",
+  STATE_CORRUPT: "Fix state.json by hand, or delete it and run `skillsym sync` to rebuild it from the links on disk.",
+};
+
 function report(err: unknown, io: Io, json: boolean): ExitCode {
   const error =
     err instanceof SkillsymError
@@ -434,7 +637,11 @@ function report(err: unknown, io: Io, json: boolean): ExitCode {
         ? { code: "USAGE", message: err.message, details: {} }
         : { code: "INTERNAL", message: (err as Error)?.message ?? String(err), details: {} };
   if (json) io.stdout(JSON.stringify({ error }));
-  else io.stderr(`skillsym: ${error.message}`);
+  else {
+    io.stderr(`skillsym: ${error.message}`);
+    const next = NEXT_STEP[error.code];
+    if (next) io.stderr(`  ${next}`);
+  }
   return 2;
 }
 

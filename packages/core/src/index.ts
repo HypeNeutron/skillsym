@@ -58,6 +58,19 @@ export {
   type ImportOptions,
 } from "./import.js";
 export {
+  resolveImportConflicts,
+  continueImport,
+  abortImport,
+  readPendingImport,
+  importVersions,
+  type ImportChoice,
+  type ImportDecision,
+  type ImportDecisionResult,
+  type ImportVersion,
+  type PendingImport,
+  type BinaryConflict,
+} from "./import-conflicts.js";
+export {
   removeSkills,
   type RemoveOptions,
   type RemoveResult,

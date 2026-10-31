@@ -16,6 +16,8 @@ export interface Hub {
   statePath: string;
   /** User settings, e.g. custom agent profiles. Optional. */
   configPath: string;
+  /** Present while a merge started by `import` waits for `import --continue` or `--abort`. */
+  pendingImportPath: string;
   lockPath: string;
 }
 
@@ -40,6 +42,7 @@ export function hubPaths(home: string): Hub {
     manifestPath: path.join(home, "manifest.json"),
     statePath: path.join(home, "state.json"),
     configPath: path.join(home, "config.json"),
+    pendingImportPath: path.join(home, "import-pending.json"),
     lockPath: path.join(home, ".lock"),
   };
 }
