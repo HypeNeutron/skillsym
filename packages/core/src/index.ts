@@ -71,6 +71,7 @@ export {
   type BinaryConflict,
 } from "./import-conflicts.js";
 export { initSkill, type InitResult } from "./init.js";
+export { cloudSyncProvider, hubLocationWarnings } from "./safety.js";
 export { eject, type EjectOptions, type EjectReport, type EjectResult, type EjectOutcome } from "./eject.js";
 export {
   removeSkills,

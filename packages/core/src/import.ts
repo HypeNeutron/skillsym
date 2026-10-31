@@ -84,6 +84,16 @@ export async function planImport(hub: Hub, options: ImportOptions = {}): Promise
         .map(async (e) => ((await isDirectory(e.path)) && (await isFile(path.join(e.path, "SKILL.md"))) ? { name: e.skill, path: e.path, agents: e.agents, isLink: false } : null)),
     )).filter((c): c is NonNullable<typeof c> => c !== null),
   ];
+  // Folders that another tool's links point at (e.g. the copies `npx skills` keeps in
+  // ~/.agents/skills and links into ~/.claude/skills) belong to that tool: moving them would break it.
+  const foreignTargets: string[] = [];
+  for (const u of candidates) {
+    if (!u.isLink) continue;
+    const target = await readLinkTarget(u.path);
+    if (target) foreignTargets.push(target);
+  }
+  for (const e of report.entries) if (!e.owned && e.linkTarget) foreignTargets.push(e.linkTarget);
+
   for (const u of candidates) {
     if (u.isLink) {
       items.push({
@@ -91,6 +101,15 @@ export async function planImport(hub: Hub, options: ImportOptions = {}): Promise
         type: "skip",
         sources: [],
         reason: `${u.path} is a link created by another tool; skillsym leaves it alone`,
+      });
+      continue;
+    }
+    if (foreignTargets.some((t) => samePath(t, u.path))) {
+      items.push({
+        name: u.name,
+        type: "skip",
+        sources: [],
+        reason: `${u.path} is used by another tool (its links point here); skillsym leaves it alone`,
       });
       continue;
     }

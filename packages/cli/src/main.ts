@@ -24,6 +24,7 @@ import {
   removeSkills,
   eject,
   initSkill,
+  hubLocationWarnings,
   resolveConflicts,
   scanStatus,
   SkillsymError,
@@ -101,6 +102,8 @@ Options:
   --all              All skills to all installed agents (same as -s '*' -a '*')
   --dry-run          Show what would change without changing anything
   -y, --yes          Never ask questions: sync/import conflicts are reported and left alone; remove and eject proceed
+  -g, --global       User-level skills (the default; accepted for familiarity with npx skills)
+  -p, --project      Project-level skills: not available until v0.2
   --json             Machine-readable output
   -h, --help        Show this help
   -v, --version     Show version`;
@@ -132,6 +135,12 @@ async function run(argv: string[], io: Io, json: boolean): Promise<ExitCode> {
     return command || values.help ? 0 : 2;
   }
 
+  if (values.project) {
+    throw new UsageError(
+      "Project scope (-p, --project) arrives in v0.2. For now skillsym manages user-level skills only (the default, -g).",
+    );
+  }
+
   // init only writes a template; it must not create or touch the hub.
   if (command === "init") {
     if (rest.length > 1) throw new UsageError("init takes at most one name: skillsym init [name]");
@@ -156,6 +165,8 @@ async function run(argv: string[], io: Io, json: boolean): Promise<ExitCode> {
   const agents = values.all ? ["*"] : (values.agent ?? []);
   const writes = ["add", "assign", "sync", "remove", "rm", "import", "eject"].includes(command) && !values["dry-run"];
   const showsPending = writes || command === "status" || command === "check";
+  const locationWarnings = hubLocationWarnings(hub, io.env);
+  if (writes && !json) for (const w of locationWarnings) io.stderr(`warning: ${w.message}`);
   if (showsPending && !(command === "import" && (values.continue || values.abort))) {
     const pending = await readPendingImport(hub);
     if (pending) io.stderr(`warning: a merge of "${pending.skill}" is still open in ${pending.mergeDir}; finish it with \`skillsym import --continue\` or drop it with \`--abort\`.`);
@@ -195,6 +206,7 @@ async function run(argv: string[], io: Io, json: boolean): Promise<ExitCode> {
     case "check": {
       if (rest.length) throw new UsageError(`${command} takes no arguments`);
       const report = await scanStatus(hub, { profiles });
+      report.warnings.unshift(...locationWarnings);
       if (json) io.stdout(JSON.stringify(report));
       else io.stdout(formatStatus(report));
       return command === "check" && !report.clean ? 1 : 0;
@@ -519,6 +531,8 @@ function parseCommandLine(argv: string[]) {
         continue: { type: "boolean" },
         abort: { type: "boolean" },
         yes: { type: "boolean", short: "y" },
+        global: { type: "boolean", short: "g" },
+        project: { type: "boolean", short: "p" },
         help: { type: "boolean", short: "h" },
         version: { type: "boolean", short: "v" },
       },

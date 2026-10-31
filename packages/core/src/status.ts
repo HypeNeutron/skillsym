@@ -52,7 +52,7 @@ export interface UnmanagedEntry {
 }
 
 export interface StatusWarning {
-  code: "SKILL_MD_BOM" | "UNKNOWN_AGENT_IN_MANIFEST";
+  code: "SKILL_MD_BOM" | "UNKNOWN_AGENT_IN_MANIFEST" | "HUB_IN_CLOUD_FOLDER";
   message: string;
   skill?: string;
   path?: string;
