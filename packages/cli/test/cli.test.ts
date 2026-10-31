@@ -262,6 +262,27 @@ describe("skillsym CLI", () => {
     expect(again.status).toBe(2);
   });
 
+  it("add <library> previews with --dry-run, then copies every skill and assigns them", async () => {
+    const lib = path.join(root, "my-skills");
+    await makeSkill(lib, "coding");
+    await makeSkill(path.join(lib, "writing"), "blog-post");
+
+    const preview = run(["add", lib, "--dry-run"]);
+    expect(preview.code).toBe(0);
+    expect(preview.stdout).toContain("Would add 2 skill(s)");
+    expect(preview.stdout).toContain("Nothing was changed");
+
+    const done = run(["add", lib, "-a", "claude", "--json"]);
+    expect(done.code).toBe(0);
+    const out = JSON.parse(done.stdout);
+    expect(out.added.map((s: { name: string }) => s.name).sort()).toEqual(["blog-post", "coding"]);
+    expect(out.assigned.map((r: { outcome: string }) => r.outcome)).toEqual(["linked", "linked"]);
+
+    const text = run(["add", lib]);
+    expect(text.code).toBe(1);
+    expect(text.stdout).toContain("already in the hub");
+  });
+
   it("serializes concurrent adds from separate processes", async () => {
     const names = ["a1", "a2", "a3", "a4"];
     const srcs = await Promise.all(names.map((n) => makeSkill(path.join(root, "src"), n)));

@@ -14,6 +14,10 @@ export interface ManifestSkill {
   mode: SkillMode;
   /** Only "user" is implemented in v0.1; "project" is reserved for v0.2. */
   scope: SkillScope;
+  /** Where the skill came from when it was added (a skill folder, possibly inside a library). */
+  source?: string;
+  /** Content hash of the skill at `source` when it was added. */
+  sourceHash?: string;
 }
 
 /** The user's desired state. */
@@ -70,6 +74,8 @@ export async function readManifest(file: string): Promise<Manifest> {
       agents: entry.agents.filter((a): a is string => typeof a === "string"),
       mode: entry.mode === "copy" ? "copy" : "link",
       scope: entry.scope === "project" ? "project" : "user",
+      ...(typeof entry.source === "string" ? { source: entry.source } : {}),
+      ...(typeof entry.sourceHash === "string" ? { sourceHash: entry.sourceHash } : {}),
     };
   }
   return { version: parsed.version, skills };

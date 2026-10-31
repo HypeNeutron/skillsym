@@ -1,4 +1,5 @@
 export { SkillsymError, type ErrorCode } from "./errors.js";
+export { isDirectory, isFile } from "./fsutil.js";
 export { openHub, resolveHubHome, hubPaths, type Hub, type ResolveHomeOptions } from "./hub.js";
 export {
   MANIFEST_VERSION,
@@ -71,6 +72,16 @@ export {
   type BinaryConflict,
 } from "./import-conflicts.js";
 export { initSkill, type InitResult } from "./init.js";
+export {
+  findLibrarySkills,
+  planLibraryAdd,
+  addLibrary,
+  type LibrarySkill,
+  type LibraryItem,
+  type LibraryItemType,
+  type LibraryPlan,
+  type LibraryAddResult,
+} from "./library.js";
 export { cloudSyncProvider, hubLocationWarnings } from "./safety.js";
 export { eject, type EjectOptions, type EjectReport, type EjectResult, type EjectOutcome } from "./eject.js";
 export {

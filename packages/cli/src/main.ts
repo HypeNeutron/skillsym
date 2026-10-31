@@ -25,6 +25,12 @@ import {
   eject,
   initSkill,
   hubLocationWarnings,
+  cloudSyncProvider,
+  isDirectory,
+  isFile,
+  planLibraryAdd,
+  addLibrary,
+  type LibraryItem,
   resolveConflicts,
   scanStatus,
   SkillsymError,
@@ -81,7 +87,9 @@ const USAGE = `Usage: skillsym <command> [options]
 
 Commands:
   init [name]                   Create a SKILL.md template (in ./<name>, or here without a name)
-  add <path> [-a <agents>]      Copy a skill folder (with SKILL.md) into the hub, optionally assign it
+  add <path> [-a <agents>]      Copy a skill folder (with SKILL.md) into the hub, optionally assign it.
+                                A folder of skills (your own library) adds every skill in it; the library
+                                is left untouched (--dry-run to preview)
   assign <skill...> -a <agents> Link hub skills into agents' skills folders
   list, ls                      List skills in the hub and their agents
   status                        Show every link's state: synced, missing, dangling, replaced, blocked, orphaned
@@ -174,7 +182,13 @@ async function run(argv: string[], io: Io, json: boolean): Promise<ExitCode> {
   switch (command) {
     case "add": {
       if (rest.length !== 1) throw new UsageError("add takes exactly one path: skillsym add <path> [-a <agents>]");
-      const skill = await addSkill(hub, rest[0]!);
+      const target = path.resolve(io.cwd ?? process.cwd(), rest[0]!);
+      // A folder without its own SKILL.md is a library: add every skill found in it.
+      if ((await isDirectory(target)) && !(await isFile(path.join(target, "SKILL.md")))) {
+        return addFromLibrary(hub, target, agents, profiles, io, json, Boolean(values["dry-run"]));
+      }
+      if (values["dry-run"]) throw new UsageError("--dry-run with add is for libraries (a folder of skills); adding one skill changes only the hub");
+      const skill = await addSkill(hub, target);
       if (!agents.length) {
         if (json) io.stdout(JSON.stringify({ added: skill }));
         else io.stdout(`Added "${skill.name}" to the hub (${skill.path}).`);
@@ -325,6 +339,58 @@ async function run(argv: string[], io: Io, json: boolean): Promise<ExitCode> {
     default:
       throw new UsageError(`Unknown command "${command}".\n\n${USAGE}`);
   }
+}
+
+/** `add <library>`: copy every skill in a folder of skills into the hub, then optionally assign them. */
+async function addFromLibrary(
+  hub: Hub,
+  library: string,
+  agents: string[],
+  profiles: AgentProfile[],
+  io: Io,
+  json: boolean,
+  dryRun: boolean,
+): Promise<ExitCode> {
+  const provider = cloudSyncProvider(library, io.env);
+  if (provider && !json) {
+    io.stderr(`warning: the library ${library} is inside a ${provider} folder; that is fine for copying, but keep the hub itself out of synced folders.`);
+  }
+  if (dryRun) {
+    const plan = await planLibraryAdd(hub, library);
+    if (json) io.stdout(JSON.stringify({ dryRun: true, ...plan }));
+    else io.stdout(formatLibrary(plan.items, library, true));
+    return plan.items.some((i) => i.type === "skip") ? 1 : 0;
+  }
+  const result = await addLibrary(hub, library);
+  const names = result.added.map((s) => s.name);
+  const assigned = agents.length && names.length ? (await assignSkills(hub, { skills: names, agents, profiles })).results : [];
+  if (json) io.stdout(JSON.stringify({ dryRun: false, ...result, assigned }));
+  else {
+    io.stdout(formatLibrary(result.items, library, false));
+    if (assigned.length) io.stdout(formatLinks(assigned));
+    if (names.length) {
+      io.stdout(
+        `\nThe hub is now the source of truth for these skills; edit them in ${hub.skillsDir}.` +
+          `\nskillsym does not use ${library} any more: keep it as an archive or delete it yourself.` +
+          (agents.length ? "" : "\nAssign them to agents with: skillsym assign <skill...> -a <agents>   (or -s '*' -a claude)"),
+      );
+    }
+  }
+  if (assigned.some((r) => r.outcome === "failed")) return 2;
+  return result.items.some((i) => i.type === "skip") || assigned.some((r) => r.outcome === "blocked") ? 1 : 0;
+}
+
+function formatLibrary(items: LibraryItem[], library: string, dryRun: boolean): string {
+  const add = items.filter((i) => i.type === "add");
+  const skip = items.filter((i) => i.type === "skip");
+  const lines = [`${dryRun ? "Would add" : "Added"} ${add.length} skill(s) from ${library}${dryRun ? " (copied into the hub)" : ""}:`];
+  for (const i of add) lines.push(`  ${i.name.padEnd(24)} ${path.relative(library, i.path) || "."}`);
+  if (skip.length) {
+    lines.push(`Skipped ${skip.length}:`);
+    for (const i of skip) lines.push(`  ${i.name.padEnd(24)} ${i.reason}`);
+  }
+  if (dryRun) lines.push("", "Nothing was changed. Run the same command without --dry-run to add them.");
+  return lines.join("\n");
 }
 
 const IMPORT_CHOICE_HELP: Record<ImportChoice, string> = {

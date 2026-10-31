@@ -3,6 +3,7 @@ import { promises as fs } from "node:fs";
 import path from "node:path";
 import { SkillsymError } from "./errors.js";
 import { isDirectory, isFile, pathExists } from "./fsutil.js";
+import { hashSkillDir } from "./hash.js";
 import type { Hub } from "./hub.js";
 import { withLock, type LockOptions } from "./lock.js";
 import { readManifest, writeManifest, type SkillMode, type SkillScope } from "./manifest.js";
@@ -51,32 +52,41 @@ export async function addSkill(hub: Hub, sourcePath: string, options: AddSkillOp
     hub.lockPath,
     async () => {
       const manifest = await readManifest(hub.manifestPath);
-      const dest = path.join(hub.skillsDir, name);
-      if (manifest.skills[name] || (await pathExists(dest))) {
+      if (manifest.skills[name] || (await pathExists(path.join(hub.skillsDir, name)))) {
         throw new SkillsymError("SKILL_EXISTS", `A skill named "${name}" is already in the hub.`, { name });
       }
-
-      // Stage the copy, then rename into place, so a failed copy never leaves a half skill in the hub.
-      const staging = path.join(hub.tmpDir, `${name}.${randomBytes(6).toString("hex")}`);
-      await fs.cp(source, staging, { recursive: true, errorOnExist: true, force: false });
-      try {
-        await fs.rename(staging, dest);
-      } catch (err) {
-        await fs.rm(staging, { recursive: true, force: true });
-        throw err;
-      }
-
-      manifest.skills[name] = { agents: [], mode: "link", scope: "user" };
-      try {
-        await writeManifest(hub.manifestPath, manifest);
-      } catch (err) {
-        await fs.rm(dest, { recursive: true, force: true });
-        throw err;
-      }
-      return { name, path: dest, agents: [], mode: "link" as const, scope: "user" as const };
+      return copyIntoHub(hub, name, source);
     },
     options.lock,
   );
+}
+
+/**
+ * Copy `source` into the hub as `name` and record it, with where it came from, in the manifest.
+ * Callers hold the hub lock and have checked the name is free. A failed copy or manifest write
+ * leaves the hub as it was.
+ */
+export async function copyIntoHub(hub: Hub, name: string, source: string): Promise<SkillInfo> {
+  const dest = path.join(hub.skillsDir, name);
+  // Stage the copy, then rename into place, so a failed copy never leaves a half skill in the hub.
+  const staging = path.join(hub.tmpDir, `${name}.${randomBytes(6).toString("hex")}`);
+  await fs.cp(source, staging, { recursive: true, errorOnExist: true, force: false });
+  try {
+    await fs.rename(staging, dest);
+  } catch (err) {
+    await fs.rm(staging, { recursive: true, force: true });
+    throw err;
+  }
+
+  const manifest = await readManifest(hub.manifestPath);
+  manifest.skills[name] = { agents: [], mode: "link", scope: "user", source, sourceHash: await hashSkillDir(dest) };
+  try {
+    await writeManifest(hub.manifestPath, manifest);
+  } catch (err) {
+    await fs.rm(dest, { recursive: true, force: true });
+    throw err;
+  }
+  return { name, path: dest, agents: [], mode: "link", scope: "user" };
 }
 
 export async function listSkills(hub: Hub): Promise<SkillInfo[]> {
