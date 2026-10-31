@@ -210,6 +210,26 @@ describe("skillsym CLI", () => {
     expect(JSON.parse(broken.stdout).error.code).toBe("CONFIG_INVALID");
   });
 
+  it("import brings existing skills in; differing copies exit 1", async () => {
+    const claudeSkills = path.join(root, "user", ".claude", "skills");
+    await makeSkill(claudeSkills, "research");
+
+    const preview = run(["import", "--dry-run", "--json"]);
+    expect(preview.code).toBe(0);
+    expect(JSON.parse(preview.stdout).items[0]).toMatchObject({ name: "research", type: "import" });
+
+    const done = run(["import"]);
+    expect(done.code).toBe(0);
+    expect(done.stdout).toContain("imported  research from claude");
+    expect(run(["check"]).code).toBe(0);
+
+    await makeSkill(claudeSkills, "coding", { "a.md": "1" });
+    await makeSkill(path.join(root, "user", ".agents", "skills"), "coding", { "a.md": "2" });
+    const conflict = run(["import"]);
+    expect(conflict.code).toBe(1);
+    expect(conflict.stdout).toContain("CONFLICT  coding");
+  });
+
   it("serializes concurrent adds from separate processes", async () => {
     const names = ["a1", "a2", "a3", "a4"];
     const srcs = await Promise.all(names.map((n) => makeSkill(path.join(root, "src"), n)));

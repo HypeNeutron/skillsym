@@ -47,6 +47,17 @@ export {
   type SyncOptions,
 } from "./sync.js";
 export {
+  planImport,
+  importSkills,
+  type ImportPlan,
+  type ImportItem,
+  type ImportItemType,
+  type ImportItemResult,
+  type ImportResult,
+  type ImportSource,
+  type ImportOptions,
+} from "./import.js";
+export {
   removeSkills,
   type RemoveOptions,
   type RemoveResult,

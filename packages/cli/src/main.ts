@@ -1,5 +1,6 @@
 import { readFileSync } from "node:fs";
 import os from "node:os";
+import path from "node:path";
 import { parseArgs } from "node:util";
 import {
   addSkill,
@@ -11,6 +12,8 @@ import {
   choicesFor,
   defaultForkName,
   planSync,
+  planImport,
+  importSkills,
   removeSkills,
   resolveConflicts,
   scanStatus,
@@ -22,6 +25,8 @@ import {
   type ConflictDecision,
   type ConflictResolution,
   type Hub,
+  type ImportItem,
+  type ImportItemResult,
   type RemoveOutcome,
   type RemoveResult,
   type SkillInfo,
@@ -54,6 +59,8 @@ Commands:
   check                         Same as status, but exit 1 if anything is not synced (for CI and scripts)
   sync [--dry-run]              Make the agents' folders match the manifest; asks about conflicts
                                 (without a terminal, or with -y, conflicts are only reported)
+  import [--dry-run]            Bring skills already in agents' folders into the hub (originals backed up,
+                                replaced by links); copies that differ are reported as conflicts
   remove, rm <skill...> [-a]    With -a: unassign those agents only. Without: remove from every agent
                                 and from the hub (asks first; the hub copy is moved to backups)
 
@@ -153,6 +160,20 @@ async function run(argv: string[], io: Io, json: boolean): Promise<ExitCode> {
       if (failed || resolutions.some((r) => !r.ok)) return 2;
       return resolutions.some((r) => r.choice === "skip") ? 1 : 0;
     }
+    case "import": {
+      if (rest.length) throw new UsageError("import takes no arguments; it scans every agent's skills folder");
+      if (values["dry-run"]) {
+        const plan = await planImport(hub, { profiles });
+        if (json) io.stdout(JSON.stringify({ dryRun: true, ...plan }));
+        else io.stdout(formatImport(plan.items, true));
+        return plan.items.some((i) => i.type === "conflict") ? 1 : 0;
+      }
+      const result = await importSkills(hub, { profiles });
+      if (json) io.stdout(JSON.stringify({ dryRun: false, ...result }));
+      else io.stdout(formatImport(result.items, false));
+      if (result.items.some((i) => !i.ok)) return 2;
+      return result.items.some((i) => i.type === "conflict") ? 1 : 0;
+    }
     case "remove":
     case "rm": {
       const skills = values.all ? ["*"] : [...rest, ...(values.skill ?? [])];
@@ -179,6 +200,37 @@ async function run(argv: string[], io: Io, json: boolean): Promise<ExitCode> {
     default:
       throw new UsageError(`Unknown command "${command}".\n\n${USAGE}`);
   }
+}
+
+function formatImport(items: (ImportItem | ImportItemResult)[], dryRun: boolean): string {
+  if (!items.length) return "Nothing to import: every skill in the agents' folders is already managed.";
+  const lines: string[] = [];
+  for (const item of items) {
+    const where = item.sources.map((s) => s.agents.join("+")).join(", ");
+    const result = "ok" in item ? item : undefined;
+    if (result && !result.ok) {
+      lines.push(`FAILED    ${item.name}: ${result.error}`);
+      continue;
+    }
+    switch (item.type) {
+      case "import":
+      case "link-existing": {
+        const verb = item.type === "import" ? (dryRun ? "would import" : "imported") : dryRun ? "would link (already in hub)" : "linked (already in hub)";
+        lines.push(`${verb}  ${item.name} from ${where}`);
+        if (dryRun) for (const s of item.sources) lines.push(`          back up and replace with a link: ${s.path}`);
+        for (const b of result?.backups ?? []) lines.push(`          backup: ${b}`);
+        break;
+      }
+      case "conflict":
+        lines.push(`CONFLICT  ${item.name} in ${where}: ${item.reason}`);
+        break;
+      case "skip":
+        lines.push(`skipped   ${item.name}: ${item.reason}`);
+        break;
+    }
+    for (const s of item.sources.filter((x) => x.bom)) lines.push(`          warning: ${s.path}${path.sep}SKILL.md has a UTF-8 BOM; Codex will not load it`);
+  }
+  return lines.join("\n");
 }
 
 const REMOVE_TEXT: Record<RemoveOutcome, [string, string]> = {
