@@ -69,7 +69,8 @@ export async function eject(hub: Hub, options: EjectOptions = {}): Promise<Eject
 
         try {
           if (outcome === "ejected") {
-            const source = (await isDirectory(onDisk!)) ? onDisk! : hubCopy;
+            // Resolve links (a --link skill is agent -> hub -> library) so real files are copied.
+            const source = await fs.realpath((await isDirectory(onDisk!)) ? onDisk! : hubCopy);
             await replaceLinkWithCopy(link.path, source);
           }
           state.links = state.links.filter((l) => !samePath(l.path, link.path));

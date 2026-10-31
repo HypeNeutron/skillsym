@@ -5,7 +5,9 @@ import { isDirectory, isFile, isMissing } from "./fsutil.js";
 import { hashSkillDir, hasUtf8Bom } from "./hash.js";
 import type { Hub } from "./hub.js";
 import { readLinkTarget } from "./links.js";
+import { findLibrarySkills } from "./library.js";
 import { readManifest } from "./manifest.js";
+import { isValidSkillName } from "./skills.js";
 import { readState, samePath, type StateLink } from "./state.js";
 
 export type LinkStatus =
@@ -24,7 +26,9 @@ export type LinkStatus =
   /** No link needed: the agent loads the skill from another assigned agent's folder. */
   | "covered"
   /** Our link is here although the agent already loads the skill from another folder (loaded twice). */
-  | "duplicate";
+  | "duplicate"
+  /** The skill is linked from a library folder that no longer exists (the library moved or was deleted). */
+  | "source-missing";
 
 export interface StatusEntry {
   skill: string;
@@ -58,9 +62,20 @@ export interface StatusWarning {
   path?: string;
 }
 
+/** What `add --link` libraries need attention. */
+export interface LibraryReport {
+  /** Skills linked from a library folder that no longer exists. */
+  missing: { skill: string; source: string }[];
+  /** Skills in a registered library that are not in the hub yet (not drift). */
+  newSkills: { library: string; name: string; path: string }[];
+  /** Registered library folders that no longer exist. */
+  missingLibraries: string[];
+}
+
 export interface StatusReport {
   entries: StatusEntry[];
   unmanaged: UnmanagedEntry[];
+  libraries: LibraryReport;
   warnings: StatusWarning[];
   /** True when every entry is synced or covered (unmanaged skills do not count as drift). */
   clean: boolean;
@@ -80,6 +95,7 @@ export async function scanStatus(hub: Hub, options: ScanOptions = {}): Promise<S
   const entries: StatusEntry[] = [];
   const warnings: StatusWarning[] = [];
   const expectedPaths: string[] = [];
+  const libraries: LibraryReport = { missing: [], newSkills: [], missingLibraries: [] };
 
   for (const name of Object.keys(manifest.skills).sort()) {
     const target = path.join(hub.skillsDir, name);
@@ -94,12 +110,19 @@ export async function scanStatus(hub: Hub, options: ScanOptions = {}): Promise<S
           skill: name,
         });
     }
+    const entry = manifest.skills[name]!;
+    const sourceMissing = entry.mode === "source-link" && !(entry.source && (await isDirectory(entry.source)));
+    if (sourceMissing) libraries.missing.push({ skill: name, source: entry.source ?? "" });
     const synced: string[] = [];
     for (const group of planLinkGroups(assigned)) {
       const linkPath = path.join(group.dir, name);
       const ids = group.agents.map((a) => a.id);
       expectedPaths.push(linkPath);
       const owned = state.links.find((l) => samePath(l.path, linkPath));
+      if (sourceMissing) {
+        entries.push({ skill: name, agents: ids, path: linkPath, status: "source-missing", owned: Boolean(owned) });
+        continue;
+      }
       // Coverage only counts when the covering link is really there.
       if (group.coveredBy && synced.some((d) => samePath(d, group.coveredBy!.dir))) {
         const onDisk = await readLinkTarget(linkPath);
@@ -142,8 +165,19 @@ export async function scanStatus(hub: Hub, options: ScanOptions = {}): Promise<S
     });
   }
 
+  for (const library of manifest.libraries ?? []) {
+    if (!(await isDirectory(library))) {
+      libraries.missingLibraries.push(library);
+      continue;
+    }
+    for (const s of await findLibrarySkills(library)) {
+      if (!manifest.skills[s.name] && isValidSkillName(s.name)) libraries.newSkills.push({ library, name: s.name, path: s.path });
+    }
+  }
+
   const unmanaged = await findUnmanaged(profiles, [...expectedPaths, ...state.links.map((l) => l.path)]);
-  return { entries, unmanaged, warnings, clean: entries.every((e) => e.status === "synced" || e.status === "covered") };
+  const clean = entries.every((e) => e.status === "synced" || e.status === "covered") && !libraries.missing.length;
+  return { entries, unmanaged, libraries, warnings, clean };
 }
 
 async function classify(

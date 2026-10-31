@@ -1,12 +1,12 @@
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import { builtinAgents, type AgentProfile } from "./agents.js";
-import { moveToBackup } from "./backup.js";
 import { SkillsymError } from "./errors.js";
 import { isDirectory, isMissing, pathExists, writeFileAtomic } from "./fsutil.js";
 import { hashSkillDir } from "./hash.js";
 import type { Hub } from "./hub.js";
 import { assignInManifest, placeInHub, planImport, replaceWithLinks, type ImportItem, type ImportOptions } from "./import.js";
+import { replaceHubVersion } from "./hub-version.js";
 import { withLock } from "./lock.js";
 import { readManifest } from "./manifest.js";
 import { isValidSkillName } from "./skills.js";
@@ -50,6 +50,8 @@ export interface ImportDecisionResult {
   /** For "merge": where to edit, and which files still have conflict markers. */
   mergeDir?: string;
   conflictedFiles?: string[];
+  /** Set when the result was written into the user's library (a skill added with --link). */
+  library?: string;
   /** For "merge": binary files that differ, and the extra versions to resolve. */
   binaryConflicts?: BinaryConflict[];
   error?: string;
@@ -135,10 +137,13 @@ async function choosePrimary(
 ): Promise<void> {
   const chosen = versions.find((v) => d.primary !== undefined && samePath(v.path, d.primary));
   if (!chosen) throw new Error(`choose which version to keep: ${versions.map((v) => v.path).join(", ")}`);
-  const hubDir = path.join(hub.skillsDir, item.name);
   if (chosen.label !== "hub") {
-    if (versions[0]?.label === "hub") result.backups.push(await moveToBackup(hub, hubDir, "hub", item.name));
-    await placeInHub(hub, item.name, chosen.path);
+    if (versions[0]?.label === "hub") {
+      // Writes into the user's library for a --link skill (backed up first).
+      const replaced = await replaceHubVersion(hub, item.name, chosen.path);
+      result.backups.push(...replaced.backups);
+      if (replaced.library) result.library = replaced.library;
+    } else await placeInHub(hub, item.name, chosen.path);
   }
   await assignInManifest(hub, item.name, item.sources.flatMap((s) => s.agents));
   await replaceWithLinks(hub, profiles, item.name, item.sources, result);
@@ -315,8 +320,11 @@ export async function continueImport(hub: Hub, options: ImportOptions = {}): Pro
 
       const result: ImportDecisionResult = { name: pending.skill, choice: "merge", ok: true, backups: [], linked: [] };
       const hubDir = path.join(hub.skillsDir, pending.skill);
-      if (pending.inHub && (await isDirectory(hubDir))) result.backups.push(await moveToBackup(hub, hubDir, "hub", pending.skill));
-      await placeInHub(hub, pending.skill, pending.mergeDir);
+      if (pending.inHub && (await isDirectory(hubDir))) {
+        const replaced = await replaceHubVersion(hub, pending.skill, pending.mergeDir);
+        result.backups.push(...replaced.backups);
+        if (replaced.library) result.library = replaced.library;
+      } else await placeInHub(hub, pending.skill, pending.mergeDir);
       await assignInManifest(hub, pending.skill, pending.sources.flatMap((s) => s.agents));
       await replaceWithLinks(hub, profiles, pending.skill, pending.sources, result);
       await fs.rm(pending.mergeDir, { recursive: true, force: true });

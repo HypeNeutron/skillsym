@@ -4,13 +4,17 @@ import { writeFileAtomic } from "./fsutil.js";
 
 export const MANIFEST_VERSION = 1;
 
-export type SkillMode = "link" | "copy";
+/**
+ * How a hub skill is stored: "link" = the hub holds the real folder (agents link to it);
+ * "source-link" = the hub entry is itself a link to a folder in the user's library, which stays the
+ * source of truth; "copy" is reserved.
+ */
+export type SkillMode = "link" | "copy" | "source-link";
 export type SkillScope = "user" | "project";
 
 export interface ManifestSkill {
   /** Agent ids this skill is assigned to. */
   agents: string[];
-  /** Only "link" is implemented in v0.1; "copy" is reserved. */
   mode: SkillMode;
   /** Only "user" is implemented in v0.1; "project" is reserved for v0.2. */
   scope: SkillScope;
@@ -24,6 +28,8 @@ export interface ManifestSkill {
 export interface Manifest {
   version: number;
   skills: Record<string, ManifestSkill>;
+  /** Library folders added with `add --link`; checked for new and missing skills. */
+  libraries?: string[];
 }
 
 export function emptyManifest(): Manifest {
@@ -72,13 +78,14 @@ export async function readManifest(file: string): Promise<Manifest> {
     }
     skills[name] = {
       agents: entry.agents.filter((a): a is string => typeof a === "string"),
-      mode: entry.mode === "copy" ? "copy" : "link",
+      mode: entry.mode === "copy" || entry.mode === "source-link" ? entry.mode : "link",
       scope: entry.scope === "project" ? "project" : "user",
       ...(typeof entry.source === "string" ? { source: entry.source } : {}),
       ...(typeof entry.sourceHash === "string" ? { sourceHash: entry.sourceHash } : {}),
     };
   }
-  return { version: parsed.version, skills };
+  const libraries = Array.isArray(parsed.libraries) ? parsed.libraries.filter((l): l is string => typeof l === "string") : [];
+  return { version: parsed.version, skills, ...(libraries.length ? { libraries } : {}) };
 }
 
 export async function writeManifest(file: string, manifest: Manifest): Promise<void> {
@@ -89,6 +96,7 @@ function serialize(manifest: Manifest): string {
   const sorted: Manifest = {
     version: manifest.version,
     skills: Object.fromEntries(Object.keys(manifest.skills).sort().map((k) => [k, manifest.skills[k]!])),
+    ...(manifest.libraries?.length ? { libraries: [...manifest.libraries] } : {}),
   };
   return JSON.stringify(sorted, null, 2) + "\n";
 }

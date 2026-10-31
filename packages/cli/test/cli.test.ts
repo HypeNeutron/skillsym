@@ -283,6 +283,24 @@ describe("skillsym CLI", () => {
     expect(text.stdout).toContain("already in the hub");
   });
 
+  it("add --link links the library, list shows it, and status points out new skills in it", async () => {
+    const lib = path.join(root, "my-skills");
+    await makeSkill(lib, "coding");
+    const r = run(["add", lib, "--link", "-a", "claude"]);
+    expect(r.code).toBe(0);
+    expect(r.stdout).toContain("linked to the library");
+    expect(r.stdout).toContain("Your library stays the source of truth");
+    expect(run(["ls"]).stdout).toContain(`[linked from ${path.join(lib, "coding")}]`);
+
+    await makeSkill(lib, "fresh");
+    const status = run(["status"]);
+    expect(status.code).toBe(0);
+    expect(status.stdout).toContain(`new in library ${lib}: fresh`);
+
+    const again = run(["add", lib, "--link", "--json"]);
+    expect(JSON.parse(again.stdout).items.map((i: { type: string }) => i.type).sort()).toEqual(["add", "unchanged"]);
+  });
+
   it("serializes concurrent adds from separate processes", async () => {
     const names = ["a1", "a2", "a3", "a4"];
     const srcs = await Promise.all(names.map((n) => makeSkill(path.join(root, "src"), n)));

@@ -1,7 +1,8 @@
 import { randomBytes } from "node:crypto";
 import { promises as fs } from "node:fs";
 import path from "node:path";
-import { moveAside, moveToBackup } from "./backup.js";
+import { moveAside } from "./backup.js";
+import { replaceHubVersion } from "./hub-version.js";
 import { pathExists } from "./fsutil.js";
 import type { Hub } from "./hub.js";
 import { createDirLink, readLinkTarget, removeDirLink } from "./links.js";
@@ -27,6 +28,8 @@ const CHOICES: Record<SyncConflictType, ConflictChoice[]> = {
   "replaced-different": ["adopt", "restore", "fork", "skip"],
   "missing-owned": ["restore", "drop", "skip"],
   "hub-skill-missing": ["drop", "skip"],
+  // Re-pointing needs the new library path, which `add <library> --link` takes.
+  "source-missing": ["drop", "skip"],
   // Bringing someone else's folder into the hub is `import`'s job.
   blocked: ["skip"],
 };
@@ -57,6 +60,8 @@ export interface ConflictResolution {
   backups: string[];
   /** For "fork": the new skill's name. */
   newSkill?: string;
+  /** For "adopt" on a skill linked from a library: the library folder that was rewritten. */
+  library?: string;
   error?: string;
 }
 
@@ -129,8 +134,11 @@ async function resolveOne(
 
     case "adopt": {
       const staged = await stageAgentCopy(hub, conflict);
-      result.backups.push(await moveToBackup(hub, target, "hub", conflict.skill));
-      await fs.rename(staged, target);
+      // For a skill linked from the user's library, this writes into the library (backed up first).
+      const replaced = await replaceHubVersion(hub, conflict.skill, staged);
+      result.backups.push(...replaced.backups);
+      if (replaced.library) result.library = replaced.library;
+      await fs.rm(staged, { recursive: true, force: true });
       const backup = await moveAside(hub, conflict.path, label, conflict.skill);
       if (backup) result.backups.push(backup);
       await recordStateLink(state, conflict.path, conflict.skill, target, await createDirLink(target, conflict.path));

@@ -30,8 +30,10 @@ export interface RemoveLinkResult {
 
 export interface RemovedSkill {
   skill: string;
-  /** Where the hub's copy of the skill was moved (absent on a dry run). */
+  /** Where the hub's copy of the skill was moved (absent on a dry run, and for --link skills). */
   backup?: string;
+  /** For a skill linked from a library: the library folder, which is left untouched. */
+  library?: string;
 }
 
 export interface RemoveOptions {
@@ -124,8 +126,12 @@ async function removeOne(
       result.links.push({ skill: name, agents: [], path: link.path, outcome: await unlinkIfOurs(state, link.path, target, dryRun) });
     }
     const removed: RemovedSkill = { skill: name };
+    if (entry.mode === "source-link" && entry.source) removed.library = entry.source;
     if (!dryRun) {
-      if (await isDirectory(target)) removed.backup = await moveToBackup(hub, target, "removed", name);
+      if (entry.mode === "source-link") {
+        // The hub entry is only a link into the user's library: remove the link, never the library.
+        if ((await readLinkTarget(target)) !== null) await removeDirLink(target);
+      } else if (await isDirectory(target)) removed.backup = await moveToBackup(hub, target, "removed", name);
       delete manifest.skills[name];
     }
     result.removedSkills.push(removed);

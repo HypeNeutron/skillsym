@@ -15,6 +15,8 @@ export interface SkillInfo {
   agents: string[];
   mode: SkillMode;
   scope: SkillScope;
+  /** Where the skill came from; for a --link skill, the library folder it links to. */
+  source?: string;
 }
 
 export interface AddSkillOptions {
@@ -95,6 +97,13 @@ export async function listSkills(hub: Hub): Promise<SkillInfo[]> {
     .sort()
     .map((name) => {
       const entry = manifest.skills[name]!;
-      return { name, path: path.join(hub.skillsDir, name), agents: [...entry.agents], mode: entry.mode, scope: entry.scope };
+      return {
+        name,
+        path: path.join(hub.skillsDir, name),
+        agents: [...entry.agents],
+        mode: entry.mode,
+        scope: entry.scope,
+        ...(entry.source ? { source: entry.source } : {}),
+      };
     });
 }

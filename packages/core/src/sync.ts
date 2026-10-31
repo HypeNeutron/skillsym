@@ -41,7 +41,9 @@ export type SyncConflictType =
   /** An assigned path holds something skillsym never created. */
   | "blocked"
   /** The skill's folder is gone from the hub, so there is nothing to link to. */
-  | "hub-skill-missing";
+  | "hub-skill-missing"
+  /** The library folder a --link skill points to is gone (moved or deleted). */
+  | "source-missing";
 
 export interface SyncConflict {
   type: SyncConflictType;
@@ -107,6 +109,11 @@ async function planEntry(hub: Hub, state: State, e: StatusEntry, plan: SyncPlan)
   switch (e.status) {
     case "covered":
       return;
+    case "source-missing":
+      return void conflict(
+        "source-missing",
+        "the library folder this skill is linked from is gone; if you moved the library, run `skillsym add <new library path> --link`",
+      );
     case "duplicate":
       return void plan.actions.push({ type: "unlink-duplicate", ...base });
     case "synced":

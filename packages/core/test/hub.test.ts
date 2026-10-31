@@ -78,7 +78,7 @@ describe("add + list", () => {
     expect(added).toMatchObject({ name: "research", agents: [], mode: "link", scope: "user" });
     expect(await fs.readFile(path.join(hub.skillsDir, "research", "refs", "notes.md"), "utf8")).toBe("nested");
     expect(await listSkills(hub)).toEqual([
-      { name: "research", path: path.join(hub.skillsDir, "research"), agents: [], mode: "link", scope: "user" },
+      { name: "research", path: path.join(hub.skillsDir, "research"), agents: [], mode: "link", scope: "user", source: src },
     ]);
     // The source is copied, not moved.
     expect(await listDir(src)).toEqual(["SKILL.md", "refs"]);
