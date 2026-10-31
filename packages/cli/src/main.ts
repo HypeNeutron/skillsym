@@ -93,7 +93,8 @@ Commands:
                                 library instead of copying it, so the library stays the source of truth
   assign <skill...> -a <agents> Link hub skills into agents' skills folders
   list, ls                      List skills in the hub and their agents
-  status                        Show every link's state: synced, missing, dangling, replaced, blocked, orphaned
+  status                        Show every link's state (synced, covered, missing, dangling, replaced, blocked,
+                                orphaned, duplicate, source-missing), unmanaged skills and library news
   check                         Same as status, but exit 1 if anything is not synced (for CI and scripts)
   sync [--dry-run]              Make the agents' folders match the manifest; asks about conflicts
                                 (without a terminal, or with -y, conflicts are only reported)
