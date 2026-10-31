@@ -17,12 +17,21 @@ export async function writeFileAtomic(file: string, text: string): Promise<void>
   }
 }
 
+/**
+ * True when an fs error means "nothing there". A path that goes through a file (e.g. README.txt/SKILL.md)
+ * fails with ENOTDIR on macOS and Linux but ENOENT on Windows; both mean the same thing here.
+ */
+export function isMissing(err: unknown): boolean {
+  const code = (err as NodeJS.ErrnoException)?.code;
+  return code === "ENOENT" || code === "ENOTDIR";
+}
+
 export async function pathExists(p: string): Promise<boolean> {
   try {
     await fs.lstat(p);
     return true;
   } catch (err) {
-    if ((err as NodeJS.ErrnoException).code === "ENOENT") return false;
+    if (isMissing(err)) return false;
     throw err;
   }
 }
@@ -31,7 +40,7 @@ export async function isFile(p: string): Promise<boolean> {
   try {
     return (await fs.stat(p)).isFile();
   } catch (err) {
-    if ((err as NodeJS.ErrnoException).code === "ENOENT") return false;
+    if (isMissing(err)) return false;
     throw err;
   }
 }
@@ -40,7 +49,7 @@ export async function isDirectory(p: string): Promise<boolean> {
   try {
     return (await fs.stat(p)).isDirectory();
   } catch (err) {
-    if ((err as NodeJS.ErrnoException).code === "ENOENT") return false;
+    if (isMissing(err)) return false;
     throw err;
   }
 }

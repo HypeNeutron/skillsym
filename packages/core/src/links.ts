@@ -1,5 +1,6 @@
 import { promises as fs } from "node:fs";
 import path from "node:path";
+import { isMissing } from "./fsutil.js";
 import type { LinkKind } from "./state.js";
 
 /**
@@ -40,7 +41,7 @@ export async function readLinkTarget(p: string): Promise<string | null> {
     const raw = await fs.readlink(p);
     return path.resolve(path.dirname(p), raw.replace(/^\\\\\?\\/, ""));
   } catch (err) {
-    if ((err as NodeJS.ErrnoException).code === "ENOENT") return null;
+    if (isMissing(err)) return null;
     throw err;
   }
 }

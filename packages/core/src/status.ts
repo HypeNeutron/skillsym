@@ -1,7 +1,7 @@
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import { builtinAgents, groupBySkillsDir, planLinkGroups, type AgentProfile } from "./agents.js";
-import { isDirectory, isFile } from "./fsutil.js";
+import { isDirectory, isFile, isMissing } from "./fsutil.js";
 import { hashSkillDir, hasUtf8Bom } from "./hash.js";
 import type { Hub } from "./hub.js";
 import { readLinkTarget } from "./links.js";
@@ -158,7 +158,7 @@ async function classify(
   try {
     stat = await fs.lstat(linkPath);
   } catch (err) {
-    if ((err as NodeJS.ErrnoException).code === "ENOENT") return { ...base, status: "missing" };
+    if (isMissing(err)) return { ...base, status: "missing" };
     throw err;
   }
 
@@ -221,7 +221,7 @@ async function hasBom(file: string): Promise<boolean> {
       await handle.close();
     }
   } catch (err) {
-    if ((err as NodeJS.ErrnoException).code === "ENOENT") return false;
+    if (isMissing(err)) return false;
     throw err;
   }
 }

@@ -147,6 +147,13 @@ describe("status", () => {
     expect(report.clean).toBe(true);
   });
 
+  it("ignores plain files in an agent's skills folder (ENOTDIR on macOS/Linux)", async () => {
+    await fs.writeFile(path.join(claudeDir(), "README.txt"), "not a skill");
+    const report = await scan();
+    expect(report.unmanaged).toEqual([]);
+    expect(report.clean).toBe(true);
+  });
+
   it("warns when a hub skill's SKILL.md has a BOM (Codex rejects it)", async () => {
     const file = path.join(hub.skillsDir, "research", "SKILL.md");
     await fs.writeFile(file, Buffer.concat([Buffer.from([0xef, 0xbb, 0xbf]), await fs.readFile(file)]));

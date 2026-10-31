@@ -3,7 +3,7 @@ import path from "node:path";
 import { builtinAgents, type AgentProfile } from "./agents.js";
 import { moveToBackup } from "./backup.js";
 import { SkillsymError } from "./errors.js";
-import { isDirectory, pathExists, writeFileAtomic } from "./fsutil.js";
+import { isDirectory, isMissing, pathExists, writeFileAtomic } from "./fsutil.js";
 import { hashSkillDir } from "./hash.js";
 import type { Hub } from "./hub.js";
 import { assignInManifest, placeInHub, planImport, replaceWithLinks, type ImportItem, type ImportOptions } from "./import.js";
@@ -261,7 +261,7 @@ export async function readPendingImport(hub: Hub): Promise<PendingImport | null>
   try {
     return JSON.parse(await fs.readFile(hub.pendingImportPath, "utf8")) as PendingImport;
   } catch (err) {
-    if ((err as NodeJS.ErrnoException).code === "ENOENT") return null;
+    if (isMissing(err)) return null;
     throw err;
   }
 }
@@ -357,7 +357,7 @@ async function readOrNull(file: string): Promise<Buffer | null> {
   try {
     return await fs.readFile(file);
   } catch (err) {
-    if ((err as NodeJS.ErrnoException).code === "ENOENT") return null;
+    if (isMissing(err)) return null;
     throw err;
   }
 }

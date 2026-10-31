@@ -3,6 +3,7 @@ import { promises as fs } from "node:fs";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { addSkill, listSkills, openHub, readManifest, resolveHubHome, SkillsymError } from "../src/index.js";
+import { isDirectory, isFile, isMissing } from "../src/fsutil.js";
 import { listDir, makeSkill, makeTempDir, removeDir } from "./helpers.js";
 
 let root: string;
@@ -28,6 +29,21 @@ async function expectCode(promise: Promise<unknown>, code: string): Promise<void
   expect(err).toBeInstanceOf(SkillsymError);
   expect((err as SkillsymError).code).toBe(code);
 }
+
+describe("isMissing", () => {
+  it("treats ENOENT and ENOTDIR as nothing there, and other errors as real errors", () => {
+    expect(isMissing({ code: "ENOENT" })).toBe(true);
+    expect(isMissing({ code: "ENOTDIR" })).toBe(true);
+    expect(isMissing({ code: "EACCES" })).toBe(false);
+  });
+
+  it("says a path through a file does not exist", async () => {
+    const file = path.join(root, "README.txt");
+    await fs.writeFile(file, "x");
+    expect(await isFile(path.join(file, "SKILL.md"))).toBe(false);
+    expect(await isDirectory(path.join(file, "sub"))).toBe(false);
+  });
+});
 
 describe("hub location", () => {
   it("uses SKILLSYM_HOME when set", () => {

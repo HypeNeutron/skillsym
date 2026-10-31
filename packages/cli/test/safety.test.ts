@@ -129,7 +129,11 @@ describe("skillsym never touches what it did not create", () => {
       ["eject", "-y"],
       ["init", "new-skill"],
     ];
-    for (const step of steps) await main(step, io());
+    for (const step of steps) {
+      const code = await main(step, io());
+      // 1 (something needs attention) is expected for some steps; 2 would mean a command broke.
+      expect(code, `${step.join(" ")}\n${out.join("\n")}`).not.toBe(2);
+    }
 
     expect(await foreignSnapshot()).toEqual(before);
   });
