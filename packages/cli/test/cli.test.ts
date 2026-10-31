@@ -230,6 +230,25 @@ describe("skillsym CLI", () => {
     expect(conflict.stdout).toContain("CONFLICT  coding");
   });
 
+  it("eject needs -y without a terminal, then leaves real copies and says the hub can go", async () => {
+    run(["add", await makeSkill(path.join(root, "src"), "coding"), "-a", "claude"]);
+    const link = path.join(root, "user", ".claude", "skills", "coding");
+
+    const refused = run(["eject"]);
+    expect(refused.code).toBe(2);
+    expect(refused.stderr).toContain("--dry-run");
+    expect((await fs.lstat(link)).isSymbolicLink()).toBe(true);
+
+    const preview = run(["eject", "--dry-run"]);
+    expect(preview.code).toBe(0);
+    expect(preview.stdout).toContain("Nothing was changed");
+
+    const done = run(["eject", "-y"]);
+    expect(done.code).toBe(0);
+    expect(done.stdout).toContain("no longer depend on skillsym");
+    expect((await fs.lstat(link)).isSymbolicLink()).toBe(false);
+  });
+
   it("serializes concurrent adds from separate processes", async () => {
     const names = ["a1", "a2", "a3", "a4"];
     const srcs = await Promise.all(names.map((n) => makeSkill(path.join(root, "src"), n)));

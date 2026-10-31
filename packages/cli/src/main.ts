@@ -22,6 +22,7 @@ import {
   abortImport,
   readPendingImport,
   removeSkills,
+  eject,
   resolveConflicts,
   scanStatus,
   SkillsymError,
@@ -33,6 +34,8 @@ import {
   type ConflictResolution,
   type Hub,
   type BinaryConflict,
+  type EjectOutcome,
+  type EjectReport,
   type ImportChoice,
   type ImportDecision,
   type ImportDecisionResult,
@@ -85,13 +88,15 @@ Commands:
   import --continue | --abort   Finish or drop an open merge
   remove, rm <skill...> [-a]    With -a: unassign those agents only. Without: remove from every agent
                                 and from the hub (asks first; the hub copy is moved to backups)
+  eject [--dry-run]             Stop using skillsym: replace every skillsym link with a real copy (asks first;
+                                the hub is kept, delete it yourself when you are sure)
 
 Options:
   -a, --agent <ids>  Agents: claude, codex, cursor, universal; comma-separated or repeated; '*' = all installed
   -s, --skill <name> Skill names (alternative to positional names); '*' = all skills in the hub
   --all              All skills to all installed agents (same as -s '*' -a '*')
   --dry-run          Show what would change without changing anything
-  -y, --yes          Never ask questions: sync/import conflicts are reported and left alone; remove proceeds
+  -y, --yes          Never ask questions: sync/import conflicts are reported and left alone; remove and eject proceed
   --json             Machine-readable output
   -h, --help        Show this help
   -v, --version     Show version`;
@@ -127,7 +132,7 @@ async function run(argv: string[], io: Io, json: boolean): Promise<ExitCode> {
   // Agents' folders come from the env we were given, never from process-global state.
   const profiles = await loadProfiles(hub, userHome(io.env));
   const agents = values.all ? ["*"] : (values.agent ?? []);
-  const writes = ["add", "assign", "sync", "remove", "rm", "import"].includes(command) && !values["dry-run"];
+  const writes = ["add", "assign", "sync", "remove", "rm", "import", "eject"].includes(command) && !values["dry-run"];
   const showsPending = writes || command === "status" || command === "check";
   if (showsPending && !(command === "import" && (values.continue || values.abort))) {
     const pending = await readPendingImport(hub);
@@ -260,6 +265,28 @@ async function run(argv: string[], io: Io, json: boolean): Promise<ExitCode> {
       if (json) io.stdout(JSON.stringify({ dryRun, ...result }));
       else io.stdout(formatRemove(result, dryRun));
       return 0;
+    }
+    case "eject": {
+      if (rest.length) throw new UsageError("eject takes no arguments; it replaces every skillsym link with a real copy");
+      const dryRun = Boolean(values["dry-run"]);
+      if (!dryRun && !values.yes) {
+        if (!(io.interactive && io.ask && !json)) {
+          throw new UsageError("eject replaces every skillsym link with a real copy; confirm with -y, or preview it with --dry-run.");
+        }
+        const answer = (
+          await io.ask("Replace every skillsym link with a real copy of the skill, so you can stop using skillsym? [y/N] (Enter = no) ")
+        )
+          .trim()
+          .toLowerCase();
+        if (answer !== "y" && answer !== "yes") {
+          io.stdout("Cancelled; nothing changed. Preview what eject would do with `skillsym eject --dry-run`.");
+          return 1;
+        }
+      }
+      const report = await eject(hub, { dryRun });
+      if (json) io.stdout(JSON.stringify({ dryRun, ...report }));
+      else io.stdout(formatEject(report, dryRun));
+      return report.results.some((r) => r.outcome === "failed") ? 2 : 0;
     }
     default:
       throw new UsageError(`Unknown command "${command}".\n\n${USAGE}`);
@@ -407,6 +434,31 @@ function formatImport(items: (ImportItem | ImportItemResult)[], dryRun: boolean)
         break;
     }
     for (const s of item.sources.filter((x) => x.bom)) lines.push(`          warning: ${s.path}${path.sep}SKILL.md has a UTF-8 BOM; Codex will not load it`);
+  }
+  return lines.join("\n");
+}
+
+const EJECT_TEXT: Record<EjectOutcome, [string, string]> = {
+  ejected: ["would replace link with a real copy", "replaced link with a real copy"],
+  "left-in-place": ["would leave (no longer skillsym's link)", "left in place (no longer skillsym's link)"],
+  missing: ["would forget (nothing there)", "forgot (nothing there)"],
+  "hub-missing": ["cannot copy (skill folder missing from the hub)", "skipped (skill folder missing from the hub)"],
+  failed: ["FAILED", "FAILED"],
+};
+
+function formatEject(report: EjectReport, dryRun: boolean): string {
+  if (!report.results.length) return "Nothing to eject: skillsym has no links in your agents' folders.";
+  const lines = report.results.map((r) => `${EJECT_TEXT[r.outcome][dryRun ? 0 : 1]}  ${r.skill}  (${r.path})${r.error ? `\n          ${r.error}` : ""}`);
+  if (dryRun) {
+    lines.push("", "Nothing was changed. Run `skillsym eject` to do this.");
+  } else if (report.results.some((r) => r.outcome === "failed")) {
+    lines.push("", "Some links could not be replaced and were left as they are; fix the error above and run `skillsym eject` again.");
+  } else {
+    lines.push(
+      "",
+      "Done. Your agents now hold real copies and no longer depend on skillsym.",
+      `The hub is still at ${report.hubHome} (with its backups); delete it whenever you are sure you no longer need it.`,
+    );
   }
   return lines.join("\n");
 }

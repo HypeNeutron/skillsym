@@ -138,6 +138,16 @@ describe("every question has a way out", () => {
     expect((await fs.lstat(link())).isSymbolicLink()).toBe(true);
   });
 
+  it("eject asks first; anything but y (or Ctrl+C) changes nothing", async () => {
+    await main(["add", await makeSkill(path.join(root, "src"), "coding"), "-a", "claude"], io());
+    expect(await main(["eject"], io([""]))).toBe(1);
+    expect(out.join("\n")).toContain("eject --dry-run");
+    expect(await main(["eject"], io([CTRL_C]))).toBe(1);
+    expect((await fs.lstat(link())).isSymbolicLink()).toBe(true);
+    expect(await main(["eject"], io(["y"]))).toBe(0);
+    expect((await fs.lstat(link())).isSymbolicLink()).toBe(false);
+  });
+
   it("an invalid fork name is asked again", async () => {
     await setupReplaced();
     expect(await main(["sync"], io(["f", "bad name", "coding-mine"]))).toBe(0);
