@@ -181,3 +181,26 @@ describe("no network access", () => {
     for (const spy of spies) expect(spy).not.toHaveBeenCalled();
   });
 });
+
+describe("commands that only look", () => {
+  it("do not create the hub", async () => {
+    await makeSkill(path.join(userHome, ".claude", "skills"), "mine");
+    const lib = path.join(root, "lib");
+    await makeSkill(lib, "from-lib");
+    const steps = [
+      ["status"],
+      ["check"],
+      ["list"],
+      ["sync", "--dry-run"],
+      ["import", "--dry-run"],
+      ["eject", "--dry-run"],
+      ["add", lib, "--dry-run", "-a", "claude"],
+      ["status", "--json"],
+    ];
+    for (const step of steps) {
+      expect(await main(step, io()), step.join(" ")).toBeLessThan(2);
+    }
+    await expect(fs.access(hubHome)).rejects.toThrow();
+    expect(out.join("\n")).toContain("mine");
+  });
+});

@@ -46,11 +46,18 @@ export async function ensureManifest(file: string): Promise<void> {
 }
 
 /**
- * Read and validate the manifest. A newer or unknown version is an error, never a reason to
- * reset the file: the user's assignments must survive a downgrade.
+ * Read and validate the manifest. A missing file reads as empty (the hub was never created).
+ * A newer or unknown version is an error, never a reason to reset the file: the user's
+ * assignments must survive a downgrade.
  */
 export async function readManifest(file: string): Promise<Manifest> {
-  const raw = (await fs.readFile(file, "utf8")).replace(/^﻿/, "");
+  let raw: string;
+  try {
+    raw = (await fs.readFile(file, "utf8")).replace(/^﻿/, "");
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") return emptyManifest();
+    throw err;
+  }
   let parsed: unknown;
   try {
     parsed = JSON.parse(raw);

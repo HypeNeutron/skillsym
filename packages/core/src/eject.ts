@@ -46,49 +46,47 @@ const STAGING_PREFIX = ".skillsym-eject-";
  * can be run again. The hub itself is never deleted.
  */
 export async function eject(hub: Hub, options: EjectOptions = {}): Promise<EjectReport> {
-  return withLock(
-    hub.lockPath,
-    async () => {
-      const state = await readState(hub.statePath);
-      const results: EjectResult[] = [];
-      const dirs = new Set<string>();
+  const run = async (): Promise<EjectReport> => {
+    const state = await readState(hub.statePath);
+    const results: EjectResult[] = [];
+    const dirs = new Set<string>();
 
-      for (const link of [...state.links]) {
-        dirs.add(path.dirname(link.path));
-        const hubCopy = path.join(hub.skillsDir, link.skill);
-        const onDisk = await readLinkTarget(link.path);
-        const ours = onDisk !== null && (samePath(onDisk, hubCopy) || samePath(onDisk, link.target));
-        let outcome: EjectOutcome;
-        if (!ours) outcome = (await pathExists(link.path)) ? "left-in-place" : "missing";
-        else if (!(await isDirectory(onDisk!))) outcome = (await isDirectory(hubCopy)) ? "ejected" : "hub-missing";
-        else outcome = "ejected";
+    for (const link of [...state.links]) {
+      dirs.add(path.dirname(link.path));
+      const hubCopy = path.join(hub.skillsDir, link.skill);
+      const onDisk = await readLinkTarget(link.path);
+      const ours = onDisk !== null && (samePath(onDisk, hubCopy) || samePath(onDisk, link.target));
+      let outcome: EjectOutcome;
+      if (!ours) outcome = (await pathExists(link.path)) ? "left-in-place" : "missing";
+      else if (!(await isDirectory(onDisk!))) outcome = (await isDirectory(hubCopy)) ? "ejected" : "hub-missing";
+      else outcome = "ejected";
 
-        const result: EjectResult = { skill: link.skill, path: link.path, outcome };
-        results.push(result);
-        if (options.dryRun || outcome === "hub-missing") continue;
+      const result: EjectResult = { skill: link.skill, path: link.path, outcome };
+      results.push(result);
+      if (options.dryRun || outcome === "hub-missing") continue;
 
-        try {
-          if (outcome === "ejected") {
-            // Resolve links (a --link skill is agent -> hub -> library) so real files are copied.
-            const source = await fs.realpath((await isDirectory(onDisk!)) ? onDisk! : hubCopy);
-            await replaceLinkWithCopy(link.path, source);
-          }
-          state.links = state.links.filter((l) => !samePath(l.path, link.path));
-          await writeState(hub.statePath, state);
-        } catch (err) {
-          result.outcome = "failed";
-          result.error = (err as Error).message;
+      try {
+        if (outcome === "ejected") {
+          // Resolve links (a --link skill is agent -> hub -> library) so real files are copied.
+          const source = await fs.realpath((await isDirectory(onDisk!)) ? onDisk! : hubCopy);
+          await replaceLinkWithCopy(link.path, source);
         }
+        state.links = state.links.filter((l) => !samePath(l.path, link.path));
+        await writeState(hub.statePath, state);
+      } catch (err) {
+        result.outcome = "failed";
+        result.error = (err as Error).message;
       }
+    }
 
-      if (!options.dryRun) {
-        await clearAssignments(hub, results);
-        for (const dir of dirs) await removeStaleStaging(dir);
-      }
-      return { results, hubHome: hub.home };
-    },
-    options.lock,
-  );
+    if (!options.dryRun) {
+      await clearAssignments(hub, results);
+      for (const dir of dirs) await removeStaleStaging(dir);
+    }
+    return { results, hubHome: hub.home };
+  };
+  // A dry run changes nothing, so it needs no lock (and must not create one in a hub that may not exist).
+  return options.dryRun ? run() : withLock(hub.lockPath, run, options.lock);
 }
 
 /**

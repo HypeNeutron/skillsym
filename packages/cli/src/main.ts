@@ -9,6 +9,7 @@ import {
   loadProfiles,
   listSkills,
   openHub,
+  hubPaths,
   resolveHubHome,
   choicesFor,
   isValidSkillName,
@@ -170,11 +171,13 @@ async function run(argv: string[], io: Io, json: boolean): Promise<ExitCode> {
     return 0;
   }
 
-  const hub = await openHub(resolveHubHome({ env: io.env }));
+  const writes = ["add", "assign", "sync", "remove", "rm", "import", "eject"].includes(command) && !values["dry-run"];
+  // Only commands that change something create the hub; status, list and --dry-run leave the disk alone.
+  const home = resolveHubHome({ env: io.env });
+  const hub = writes ? await openHub(home) : hubPaths(home);
   // Agents' folders come from the env we were given, never from process-global state.
   const profiles = await loadProfiles(hub, userHome(io.env));
   const agents = values.all ? ["*"] : (values.agent ?? []);
-  const writes = ["add", "assign", "sync", "remove", "rm", "import", "eject"].includes(command) && !values["dry-run"];
   const showsPending = writes || command === "status" || command === "check";
   const locationWarnings = hubLocationWarnings(hub, io.env);
   if (writes && !json) for (const w of locationWarnings) io.stderr(`warning: ${w.message}`);

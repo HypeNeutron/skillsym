@@ -198,7 +198,7 @@ describe("skillsym CLI", () => {
   });
 
   it("uses custom agents from config.json, and a broken config stops every command", async () => {
-    run(["list"]);
+    await fs.mkdir(home, { recursive: true });
     await fs.writeFile(path.join(home, "config.json"), JSON.stringify({ version: 1, agents: [{ id: "windsurf", skillsDir: "~/.windsurf/skills" }] }));
     const r = run(["add", await makeSkill(path.join(root, "src"), "coding"), "-a", "windsurf", "--json"]);
     expect(r.code).toBe(0);
