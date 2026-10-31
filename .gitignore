@@ -2,3 +2,9 @@ node_modules/
 dist/
 *.tsbuildinfo
 coverage/
+
+# Copied in by scripts/prepack.mjs when packing
+packages/cli/README.md
+packages/*/LICENSE
+*.tgz
+.release/

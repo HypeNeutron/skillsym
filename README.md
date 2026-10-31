@@ -23,6 +23,10 @@ other agents, notices when something drifts, and helps you fix it, without copyi
 
 Node.js 20 or later. Works on Windows, macOS and Linux.
 
+**Tested with:** Claude Code, Codex and Cursor on Windows 11. On macOS and Linux, all of skillsym's link handling
+is tested in CI, but it has not yet been tried with the agents themselves. If you use it there, please
+[open an issue](https://github.com/HypeNeutron/skillsym/issues) and say whether your agents picked up the skills.
+
 ## Quickstart
 
 Already have skills in your agents' folders? Bring them in:

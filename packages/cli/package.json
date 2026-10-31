@@ -1,18 +1,42 @@
 {
   "name": "skillsym",
-  "version": "0.0.0",
+  "version": "0.1.0",
   "description": "Keep every coding agent's skills in one hub, linked and drift-checked.",
+  "keywords": [
+    "agent-skills",
+    "skills",
+    "claude-code",
+    "codex",
+    "cursor",
+    "symlink",
+    "junction",
+    "cli"
+  ],
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/HypeNeutron/skillsym.git",
+    "directory": "packages/cli"
+  },
+  "homepage": "https://github.com/HypeNeutron/skillsym#readme",
+  "bugs": {
+    "url": "https://github.com/HypeNeutron/skillsym/issues"
+  },
   "type": "module",
   "bin": {
     "skillsym": "./dist/index.js"
   },
-  "files": ["dist"],
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
   "engines": {
     "node": ">=20"
   },
   "scripts": {
-    "build": "tsc -p ."
+    "build": "tsc -p .",
+    "prepack": "node ../../scripts/prepack.mjs"
   },
   "dependencies": {
     "@skillsym/core": "workspace:*"

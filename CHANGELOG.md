@@ -24,3 +24,10 @@ First release: the command line tool.
 - **Prompts**: Enter skips, `q` skips the rest, Ctrl+C cancels without applying any answer; `-y` never asks.
 - `--dry-run` for every command that changes files, `--json` everywhere, exit codes 0 / 1 / 2.
 - No network calls, no telemetry.
+
+### Known limitations
+
+- Tested with Claude Code, Codex and Cursor on Windows. On macOS and Linux the link handling is tested in CI, but
+  not yet with the agents themselves; reports are welcome.
+- Cursor loads skills only when it starts: restart it after changing a skill.
+- User-level skills only; project-level skills (`-p`) arrive in v0.2.
