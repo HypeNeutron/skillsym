@@ -23,6 +23,7 @@ import {
   readPendingImport,
   removeSkills,
   eject,
+  initSkill,
   resolveConflicts,
   scanStatus,
   SkillsymError,
@@ -57,6 +58,8 @@ export interface Io {
   stdout: (text: string) => void;
   stderr: (text: string) => void;
   env: NodeJS.ProcessEnv;
+  /** Working directory for commands that create files (init); defaults to the process's. */
+  cwd?: string;
   /** True when a person is at the terminal and can answer questions. */
   interactive?: boolean;
   /** Ask one question and return the typed answer. Rejects with PromptCancelled on Ctrl+C or end of input. */
@@ -76,6 +79,7 @@ const PROMPT_KEYS = "Enter = skip · q = skip all the rest · Ctrl+C = cancel wi
 const USAGE = `Usage: skillsym <command> [options]
 
 Commands:
+  init [name]                   Create a SKILL.md template (in ./<name>, or here without a name)
   add <path> [-a <agents>]      Copy a skill folder (with SKILL.md) into the hub, optionally assign it
   assign <skill...> -a <agents> Link hub skills into agents' skills folders
   list, ls                      List skills in the hub and their agents
@@ -126,6 +130,24 @@ async function run(argv: string[], io: Io, json: boolean): Promise<ExitCode> {
   if (values.help || !command) {
     io.stdout(USAGE);
     return command || values.help ? 0 : 2;
+  }
+
+  // init only writes a template; it must not create or touch the hub.
+  if (command === "init") {
+    if (rest.length > 1) throw new UsageError("init takes at most one name: skillsym init [name]");
+    const created = await initSkill(io.cwd ?? process.cwd(), rest[0]);
+    if (json) io.stdout(JSON.stringify({ created }));
+    else {
+      io.stdout(
+        [
+          `Created ${created.skillMd}`,
+          "Next:",
+          "  1. Edit SKILL.md: replace the description and instructions with your own.",
+          `  2. Add it to the hub and your agents: skillsym add ${rest[0] ?? "."} -a claude   (or -a '*' for every installed agent)`,
+        ].join("\n"),
+      );
+    }
+    return 0;
   }
 
   const hub = await openHub(resolveHubHome({ env: io.env }));
@@ -677,6 +699,7 @@ const NEXT_STEP: Record<string, string> = {
   CONFIG_INVALID: "Fix the file, or delete it to use only the built-in agents.",
   UNKNOWN_AGENT: "Agents that are not built in can be added in config.json in the hub folder.",
   SKILL_NOT_IN_HUB: "See what is in the hub with `skillsym list`.",
+  INVALID_SKILL_NAME: "Use only letters, digits, \".\", \"_\" and \"-\", starting with a letter or digit.",
   MANIFEST_CORRUPT: "Restore manifest.json from a backup, or fix the JSON by hand; skillsym will not overwrite it.",
   STATE_CORRUPT: "Fix state.json by hand, or delete it and run `skillsym sync` to rebuild it from the links on disk.",
 };

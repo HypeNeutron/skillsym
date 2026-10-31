@@ -249,6 +249,19 @@ describe("skillsym CLI", () => {
     expect((await fs.lstat(link)).isSymbolicLink()).toBe(false);
   });
 
+  it("init creates a template in the current folder, says what to do next, and leaves the hub alone", async () => {
+    const work = path.join(root, "work");
+    await fs.mkdir(work);
+    const r = spawnSync(process.execPath, [BIN, "init", "my-skill"], { encoding: "utf8", env: env(), cwd: work });
+    expect(r.status).toBe(0);
+    expect(r.stdout).toContain("skillsym add my-skill -a");
+    expect((await fs.readFile(path.join(work, "my-skill", "SKILL.md"), "utf8")).startsWith("---\nname: my-skill\n")).toBe(true);
+    await expect(fs.stat(home)).rejects.toThrow();
+
+    const again = spawnSync(process.execPath, [BIN, "init", "my-skill"], { encoding: "utf8", env: env(), cwd: work });
+    expect(again.status).toBe(2);
+  });
+
   it("serializes concurrent adds from separate processes", async () => {
     const names = ["a1", "a2", "a3", "a4"];
     const srcs = await Promise.all(names.map((n) => makeSkill(path.join(root, "src"), n)));
