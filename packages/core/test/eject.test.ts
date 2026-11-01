@@ -132,3 +132,93 @@ describe("eject", () => {
     expect((await eject(hub)).results).toEqual([]);
   });
 });
+
+describe("eject by skill or agent", () => {
+  const isLink = async (p: string) => (await fs.lstat(p)).isSymbolicLink();
+
+  async function other(name: string, agents: string[]) {
+    await addSkill(hub, await makeSkill(path.join(root, "src"), name));
+    await assignSkills(hub, { skills: [name], agents, profiles });
+  }
+
+  it("gives one agent a real copy of the latest hub version and leaves other agents linked", async () => {
+    await assignSkills(hub, { skills: ["coding"], agents: ["codex"], profiles });
+    await fs.writeFile(path.join(hub.skillsDir, "coding", "edited.md"), "after import");
+
+    const report = await eject(hub, { skills: ["coding"], agents: ["claude"], profiles });
+
+    expect(report.results).toMatchObject([{ skill: "coding", path: claude(), outcome: "ejected" }]);
+    expect(report.leftHub).toEqual([]);
+    expect(await isLink(claude())).toBe(false);
+    expect(await fs.readFile(path.join(claude(), "edited.md"), "utf8")).toBe("after import");
+    expect(await isLink(agentsDir())).toBe(true);
+    const manifest = await readManifest(hub.manifestPath);
+    expect(manifest.skills.coding!.agents).not.toContain("claude");
+    expect(manifest.skills.coding!.agents).toContain("codex");
+    const status = await scanStatus(hub, { profiles });
+    expect(status.clean).toBe(true);
+    expect(status.unmanaged.map((u) => u.name)).toContain("coding");
+  });
+
+  it("-a alone covers every skill of that agent and nothing else", async () => {
+    await other("third", ["codex"]);
+
+    await eject(hub, { agents: ["claude"], profiles });
+
+    expect(await isLink(claude("coding"))).toBe(false);
+    expect(await isLink(claude("research"))).toBe(false);
+    expect(await isLink(agentsDir("coding"))).toBe(true);
+    expect(await isLink(agentsDir("third"))).toBe(true);
+    // research was only Claude's, so it left the hub; coding still has Codex.
+    expect(Object.keys((await readManifest(hub.manifestPath)).skills)).toEqual(["coding", "third"]);
+  });
+
+  it("moves a skill no agent uses any more out of the hub, keeping a backup", async () => {
+    const report = await eject(hub, { skills: ["research"], profiles });
+
+    expect(report.leftHub).toMatchObject([{ skill: "research" }]);
+    expect(await isLink(claude("research"))).toBe(false);
+    await expect(fs.access(path.join(hub.skillsDir, "research"))).rejects.toThrow();
+    expect(await hashSkillDir(report.leftHub[0]!.backup!)).toBe(await hashSkillDir(claude("research")));
+    expect((await readManifest(hub.manifestPath)).skills.research).toBeUndefined();
+    expect((await readState(hub.statePath)).links.some((l) => l.skill === "research")).toBe(false);
+    expect(await isLink(claude("coding"))).toBe(true);
+  });
+
+  it("a dry run reports the same result and changes nothing", async () => {
+    const manifestBefore = await fs.readFile(hub.manifestPath, "utf8");
+    const linksBefore = (await readState(hub.statePath)).links.length;
+    const report = await eject(hub, { skills: ["research"], profiles, dryRun: true });
+
+    expect(report.results).toMatchObject([{ path: claude("research"), outcome: "ejected" }]);
+    expect(report.leftHub).toMatchObject([{ skill: "research" }]);
+    expect(await isLink(claude("research"))).toBe(true);
+    expect(await fs.readFile(hub.manifestPath, "utf8")).toBe(manifestBefore);
+    expect((await readState(hub.statePath)).links).toHaveLength(linksBefore);
+  });
+
+  it("keeps a link another assigned agent reads from the same folder", async () => {
+    await assignSkills(hub, { skills: ["coding"], agents: ["codex", "universal"], profiles });
+
+    const report = await eject(hub, { skills: ["coding"], agents: ["codex"], profiles });
+
+    expect(report.results).toMatchObject([{ path: agentsDir(), outcome: "kept-shared" }]);
+    expect(await isLink(agentsDir())).toBe(true);
+    expect((await readManifest(hub.manifestPath)).skills.coding!.agents).toContain("universal");
+  });
+
+  it("does not give a covered agent a second copy once the folder it reads holds a real one", async () => {
+    await eject(hub, { skills: ["coding"], agents: ["claude"], profiles });
+
+    expect(await isLink(claude())).toBe(false);
+    expect((await readManifest(hub.manifestPath)).skills.coding!.agents).toEqual(["codex"]);
+    await expect(fs.lstat(path.join(userHome, ".cursor", "skills", "coding"))).rejects.toThrow();
+    expect((await scanStatus(hub, { profiles })).clean).toBe(true);
+  });
+
+  it("rejects an unknown skill or agent without changing anything", async () => {
+    await expect(eject(hub, { skills: ["nope"], profiles })).rejects.toThrow(/No skill named/);
+    await expect(eject(hub, { agents: ["nope"], profiles })).rejects.toThrow();
+    expect(await isLink(claude())).toBe(true);
+  });
+});

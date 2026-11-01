@@ -6,7 +6,7 @@ import type { Hub } from "./hub.js";
 import { hashSkillDir } from "./hash.js";
 import { createDirLink, readLinkTarget, removeDirLink } from "./links.js";
 import { withLock, type LockOptions } from "./lock.js";
-import { readManifest, writeManifest } from "./manifest.js";
+import { readManifest, writeManifest, type Manifest } from "./manifest.js";
 import { copyIntoHub, isValidSkillName, type SkillInfo } from "./skills.js";
 import { samePath } from "./state.js";
 
@@ -134,15 +134,41 @@ export async function addLibrary(hub: Hub, libraryPath: string, options: Library
       if (plan.link) {
         const manifest = await readManifest(hub.manifestPath);
         const libraries = manifest.libraries ?? [];
-        if (!libraries.some((l) => samePath(l, plan.library))) {
-          manifest.libraries = [...libraries, plan.library];
-          await writeManifest(hub.manifestPath, manifest);
-        }
+        if (!libraries.some((l) => samePath(l, plan.library))) manifest.libraries = [...libraries, plan.library];
+        // Adding the library again brings back anything taken out of the hub earlier.
+        manifest.skippedLibrarySkills = (manifest.skippedLibrarySkills ?? []).filter((s) => !isInside(plan.library, s));
+        await writeManifest(hub.manifestPath, manifest);
       }
       return { ...plan, added };
     },
     options.lock,
   );
+}
+
+function isInside(folder: string, p: string): boolean {
+  const rel = path.relative(folder, p);
+  return !rel.startsWith("..") && !path.isAbsolute(rel);
+}
+
+/**
+ * Call before a --link skill leaves the manifest: `status` must not offer it as new. Once a library
+ * has no skills left in the hub, skillsym stops watching it altogether.
+ */
+export function forgetLibrarySkill(manifest: Manifest, name: string): void {
+  const entry = manifest.skills[name];
+  if (entry?.mode !== "source-link" || !entry.source) return;
+  const source = entry.source;
+  const library = manifest.libraries?.find((l) => isInside(l, source));
+  if (!library) return;
+  const othersLeft = Object.entries(manifest.skills).some(
+    ([other, e]) => other !== name && e.mode === "source-link" && e.source !== undefined && isInside(library, e.source),
+  );
+  if (othersLeft) {
+    manifest.skippedLibrarySkills = [...(manifest.skippedLibrarySkills ?? []), source];
+  } else {
+    manifest.libraries = manifest.libraries!.filter((l) => l !== library);
+    manifest.skippedLibrarySkills = (manifest.skippedLibrarySkills ?? []).filter((s) => !isInside(library, s));
+  }
 }
 
 /**

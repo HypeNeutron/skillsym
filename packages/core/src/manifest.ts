@@ -30,6 +30,8 @@ export interface Manifest {
   skills: Record<string, ManifestSkill>;
   /** Library folders added with `add --link`; checked for new and missing skills. */
   libraries?: string[];
+  /** Skill folders inside those libraries that the user took out of the hub; not reported as new. */
+  skippedLibrarySkills?: string[];
 }
 
 export function emptyManifest(): Manifest {
@@ -88,7 +90,8 @@ export async function readManifest(file: string): Promise<Manifest> {
     };
   }
   const libraries = Array.isArray(parsed.libraries) ? parsed.libraries.filter((l): l is string => typeof l === "string") : [];
-  return { version: parsed.version, skills, ...(libraries.length ? { libraries } : {}) };
+  const skipped = Array.isArray(parsed.skippedLibrarySkills) ? parsed.skippedLibrarySkills.filter((l): l is string => typeof l === "string") : [];
+  return { version: parsed.version, skills, ...(libraries.length ? { libraries } : {}), ...(skipped.length ? { skippedLibrarySkills: skipped } : {}) };
 }
 
 export async function writeManifest(file: string, manifest: Manifest): Promise<void> {
@@ -100,6 +103,7 @@ function serialize(manifest: Manifest): string {
     version: manifest.version,
     skills: Object.fromEntries(Object.keys(manifest.skills).sort().map((k) => [k, manifest.skills[k]!])),
     ...(manifest.libraries?.length ? { libraries: [...manifest.libraries] } : {}),
+    ...(manifest.skippedLibrarySkills?.length ? { skippedLibrarySkills: [...manifest.skippedLibrarySkills] } : {}),
   };
   return JSON.stringify(sorted, null, 2) + "\n";
 }

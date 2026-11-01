@@ -109,6 +109,8 @@ Commands:
   config                        Show the config file's location and every agent with its skills folder
   eject [--dry-run]             Stop using skillsym: replace every skillsym link with a real copy (asks first;
                                 the hub is kept, delete it yourself when you are sure)
+  eject <skill...> [-a <agents>] Give back only these skills or agents: their links become real copies of the
+  eject -a <agents>             latest hub version. A skill no agent uses afterwards leaves the hub (copy in backups)
 
 Options:
   -a, --agent <ids>  Agents: claude, codex, cursor, universal; comma-separated or repeated; '*' = all installed
@@ -324,14 +326,20 @@ async function run(argv: string[], io: Io, json: boolean): Promise<ExitCode> {
       return 0;
     }
     case "eject": {
-      if (rest.length) throw new UsageError("eject takes no arguments; it replaces every skillsym link with a real copy");
+      const skills = [...rest, ...(values.skill ?? [])];
+      const selected = skills.length > 0 || agents.length > 0;
       const dryRun = Boolean(values["dry-run"]);
+      const scope = [skills.length ? (skills.includes("*") ? "every skill" : skills.map((s) => `"${s}"`).join(", ")) : "", agents.length ? `for ${agents.join(", ")}` : ""].filter(Boolean).join(" ");
       if (!dryRun && !values.yes) {
         if (!(io.interactive && io.ask && !json)) {
-          throw new UsageError("eject replaces every skillsym link with a real copy; confirm with -y, or preview it with --dry-run.");
+          throw new UsageError(`eject replaces ${selected ? `the links of ${scope}` : "every skillsym link"} with a real copy; confirm with -y, or preview it with --dry-run.`);
         }
         const answer = (
-          await io.ask("Replace every skillsym link with a real copy of the skill, so you can stop using skillsym? [y/N] (Enter = no) ")
+          await io.ask(
+            selected
+              ? `Replace the links of ${scope} with a real copy from the hub? [y/N] (Enter = no) `
+              : "Replace every skillsym link with a real copy of the skill, so you can stop using skillsym? [y/N] (Enter = no) ",
+          )
         )
           .trim()
           .toLowerCase();
@@ -340,9 +348,9 @@ async function run(argv: string[], io: Io, json: boolean): Promise<ExitCode> {
           return 1;
         }
       }
-      const report = await eject(hub, { dryRun });
+      const report = await eject(hub, { dryRun, ...(skills.length ? { skills } : {}), ...(agents.length ? { agents } : {}), profiles });
       if (json) io.stdout(JSON.stringify({ dryRun, ...report }));
-      else io.stdout(formatEject(report, dryRun));
+      else io.stdout(formatEject(report, dryRun, selected));
       return report.results.some((r) => r.outcome === "failed") ? 2 : 0;
     }
     case "config": {
@@ -589,16 +597,24 @@ const EJECT_TEXT: Record<EjectOutcome, [string, string]> = {
   "left-in-place": ["would leave (no longer skillsym's link)", "left in place (no longer skillsym's link)"],
   missing: ["would forget (nothing there)", "forgot (nothing there)"],
   "hub-missing": ["cannot copy (skill folder missing from the hub)", "skipped (skill folder missing from the hub)"],
+  "kept-shared": ["would keep shared link (another agent still uses it)", "kept shared link (another agent still uses it)"],
+  unassigned: ["would unassign (no link of its own)", "unassigned (no link of its own)"],
   failed: ["FAILED", "FAILED"],
 };
 
-function formatEject(report: EjectReport, dryRun: boolean): string {
-  if (!report.results.length) return "Nothing to eject: skillsym has no links in your agents' folders.";
+function formatEject(report: EjectReport, dryRun: boolean, selected: boolean): string {
+  if (!report.results.length) return selected ? "Nothing to eject: those skills are not linked to those agents." : "Nothing to eject: skillsym has no links in your agents' folders.";
   const lines = report.results.map((r) => `${EJECT_TEXT[r.outcome][dryRun ? 0 : 1]}  ${r.skill}  (${r.path})${r.error ? `\n          ${r.error}` : ""}`);
+  for (const s of report.leftHub) {
+    const where = s.library ? `your library folder ${s.library} is left untouched` : s.backup ? `the hub copy is in ${s.backup}` : "the hub copy goes to backups";
+    lines.push(`${dryRun ? "would leave" : "left"} the hub  ${s.skill}  (no agent uses it through skillsym now; ${where})`);
+  }
   if (dryRun) {
-    lines.push("", "Nothing was changed. Run `skillsym eject` to do this.");
+    lines.push("", "Nothing was changed. Run the same command without --dry-run to do this.");
   } else if (report.results.some((r) => r.outcome === "failed")) {
     lines.push("", "Some links could not be replaced and were left as they are; fix the error above and run `skillsym eject` again.");
+  } else if (selected) {
+    lines.push("", "Done. Those agents now hold real copies; everything else is still managed by skillsym.");
   } else {
     lines.push(
       "",
@@ -629,7 +645,10 @@ function formatRemove(result: RemoveResult, dryRun: boolean): string {
       lines.push(dryRun ? `would remove "${r.skill}" from the hub (backed up)` : `removed "${r.skill}" from the hub${r.backup ? `; backup: ${r.backup}` : ""}`);
     }
   }
-  return lines.length ? lines.join("\n") : "Nothing to remove.";
+  if (!lines.length) return "Nothing to remove.";
+  const skills = [...new Set(result.links.filter((l) => l.outcome === "unlinked").map((l) => l.skill))];
+  if (skills.length) lines.push("", `${dryRun ? "Those agents would no longer have" : "Those agents no longer have"} ${skills.join(", ")}. To leave them a real copy instead, use \`skillsym eject\` with the same names and -a.`);
+  return lines.join("\n");
 }
 
 function parseCommandLine(argv: string[]) {

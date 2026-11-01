@@ -4,6 +4,7 @@ import { moveToBackup } from "./backup.js";
 import { SkillsymError } from "./errors.js";
 import { isDirectory, pathExists } from "./fsutil.js";
 import type { Hub } from "./hub.js";
+import { forgetLibrarySkill } from "./library.js";
 import { readLinkTarget, removeDirLink } from "./links.js";
 import { withLock, type LockOptions } from "./lock.js";
 import { readManifest, writeManifest, type Manifest } from "./manifest.js";
@@ -132,6 +133,7 @@ async function removeOne(
         // The hub entry is only a link into the user's library: remove the link, never the library.
         if ((await readLinkTarget(target)) !== null) await removeDirLink(target);
       } else if (await isDirectory(target)) removed.backup = await moveToBackup(hub, target, "removed", name);
+      forgetLibrarySkill(manifest, name);
       delete manifest.skills[name];
     }
     result.removedSkills.push(removed);

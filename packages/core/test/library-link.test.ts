@@ -210,3 +210,45 @@ describe("library moved, and new skills in the library", () => {
     expect((await readManifest(hub.manifestPath)).skills.coding!.agents).toEqual([]);
   });
 });
+
+describe("taking linked skills out of the hub", () => {
+  const news = async () => (await status()).libraries.newSkills.map((n) => n.name);
+
+  it("does not report a removed skill as new, and adding the library again brings it back", async () => {
+    await addLibrary(hub, lib, { link: true });
+
+    await removeSkills(hub, { skills: ["blog-post"], profiles });
+    expect(await news()).toEqual([]);
+    expect((await readManifest(hub.manifestPath)).libraries).toHaveLength(1);
+
+    await makeSkill(lib, "fresh");
+    expect(await news()).toEqual(["fresh"]);
+
+    await addLibrary(hub, lib, { link: true });
+    const manifest = await readManifest(hub.manifestPath);
+    expect(Object.keys(manifest.skills).sort()).toEqual(["blog-post", "coding", "fresh"]);
+    expect(manifest.skippedLibrarySkills).toBeUndefined();
+  });
+
+  it("forgets the library once none of its skills are left, and never touches it", async () => {
+    await addLibrary(hub, lib, { link: true });
+    await assignSkills(hub, { skills: ["coding"], agents: ["claude"], profiles });
+
+    await removeSkills(hub, { skills: ["blog-post"], profiles });
+    const report = await eject(hub, { skills: ["coding"], profiles });
+
+    expect(report.leftHub).toMatchObject([{ skill: "coding", library: libSkill("coding") }]);
+    expect((await fs.lstat(claude("coding"))).isSymbolicLink()).toBe(false);
+    expect(await fs.readFile(path.join(claude("coding"), "a.md"), "utf8")).toBe("library v1\n");
+    const manifest = await readManifest(hub.manifestPath);
+    expect(manifest.libraries).toBeUndefined();
+    expect(manifest.skippedLibrarySkills).toBeUndefined();
+    expect(await news()).toEqual([]);
+    expect(await fs.readFile(path.join(libSkill("coding"), "a.md"), "utf8")).toBe("library v1\n");
+    expect(await pathIsDir(path.join(lib, "writing", "blog-post"))).toBe(true);
+  });
+});
+
+async function pathIsDir(p: string): Promise<boolean> {
+  return (await fs.stat(p)).isDirectory();
+}

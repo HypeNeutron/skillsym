@@ -171,6 +171,7 @@ export async function scanStatus(hub: Hub, options: ScanOptions = {}): Promise<S
       continue;
     }
     for (const s of await findLibrarySkills(library)) {
+      if ((manifest.skippedLibrarySkills ?? []).some((p) => samePath(p, s.path))) continue;
       if (!manifest.skills[s.name] && isValidSkillName(s.name)) libraries.newSkills.push({ library, name: s.name, path: s.path });
     }
   }

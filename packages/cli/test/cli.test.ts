@@ -255,6 +255,43 @@ describe("skillsym CLI", () => {
     expect(conflict.stdout).toContain("CONFLICT  coding");
   });
 
+  it("eject by skill or agent changes only those links; -a is never ignored", async () => {
+    run(["add", await makeSkill(path.join(root, "src"), "coding"), "-a", "claude,codex"]);
+    run(["add", await makeSkill(path.join(root, "src"), "other"), "-a", "claude"]);
+    const claude = path.join(root, "user", ".claude", "skills");
+    const codex = path.join(root, "user", ".agents", "skills", "coding");
+
+    const refused = run(["eject", "-a", "codex"]);
+    expect(refused.code).toBe(2);
+    expect(refused.stderr).toContain("for codex");
+    expect((await fs.lstat(codex)).isSymbolicLink()).toBe(true);
+
+    const preview = run(["eject", "-a", "codex", "--dry-run"]);
+    expect(preview.stdout).toContain("without --dry-run");
+    expect((await fs.lstat(codex)).isSymbolicLink()).toBe(true);
+
+    const done = run(["eject", "-a", "codex", "-y"]);
+    expect(done.code).toBe(0);
+    expect(done.stdout).toContain("still managed");
+    expect((await fs.lstat(codex)).isSymbolicLink()).toBe(false);
+    expect((await fs.lstat(path.join(claude, "coding"))).isSymbolicLink()).toBe(true);
+    expect((await fs.lstat(path.join(claude, "other"))).isSymbolicLink()).toBe(true);
+    expect(run(["check"]).code).toBe(0);
+
+    const left = run(["eject", "other", "-y"]);
+    expect(left.stdout).toContain("the hub  other");
+    expect((await fs.lstat(path.join(claude, "other"))).isSymbolicLink()).toBe(false);
+    expect(JSON.parse(run(["list", "--json"]).stdout).skills.map((s: { name: string }) => s.name)).toEqual(["coding"]);
+    expect(run(["eject", "nope", "-y"]).code).toBe(2);
+  });
+
+  it("remove says what the agent lost and how to keep a copy", async () => {
+    run(["add", await makeSkill(path.join(root, "src"), "coding"), "-a", "claude"]);
+    const r = run(["remove", "coding", "-a", "claude"]);
+    expect(r.stdout).toContain("no longer have coding");
+    expect(r.stdout).toContain("skillsym eject");
+  });
+
   it("eject needs -y without a terminal, then leaves real copies and says the hub can go", async () => {
     run(["add", await makeSkill(path.join(root, "src"), "coding"), "-a", "claude"]);
     const link = path.join(root, "user", ".claude", "skills", "coding");

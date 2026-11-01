@@ -113,6 +113,7 @@ from, so skillsym does not give it a second copy of a skill it already sees.
 | `skillsym remove <skill...>` / `rm` | Remove a skill from every agent and from the hub (the hub copy is moved to backups; a linked library is never touched). |
 | `skillsym config` | Show the config file's location and every agent with its skills folder. |
 | `skillsym eject [--dry-run]` | Stop using skillsym: replace every link with a real copy. |
+| `skillsym eject <skill...> [-a agents]` / `eject -a <agents>` | Give back only these: their links become real copies of the latest hub version, and everything else stays managed. |
 
 Options:
 
@@ -175,6 +176,7 @@ If the same skill exists in several agents with different content, you choose:
 | Edit skills in | `~/.skillsym/skills` | your library (and commit as usual) |
 | The library afterwards | not used by skillsym; keep or delete it | still in use; skillsym never deletes anything in it |
 | New skills in the library | add them again yourself | `status` lists them; run the same `add --link` again |
+| A skill you took out of the hub | | `status` no longer offers it; running `add --link` again brings it back |
 
 With `--link`, if you resolve a conflict by adopting an agent's version, or pick an agent's copy during import,
 skillsym writes it **into your library** after backing up the library's version, so you can review it with `git diff`.
@@ -207,6 +209,19 @@ npx skillsym eject
 
 Every link skillsym created becomes a real copy, so your agents keep working. The hub stays where it is, with its
 backups; delete it once you are sure.
+
+To give back only some of it, name the skills or the agents:
+
+```bash
+npx skillsym eject research -a claude   # Claude gets a real copy of research; other agents keep their links
+npx skillsym eject -a codex             # every skill linked into Codex becomes a real copy there
+```
+
+The copy is the latest version in the hub, including edits made since you imported it. A skill no agent uses
+afterwards leaves the hub: its hub copy moves to backups (a `--link` skill's library is never touched).
+
+`eject` and `remove` differ in what the agent is left with: after `eject` it has a real copy and keeps working;
+after `remove` it no longer has the skill.
 
 ## Privacy
 
