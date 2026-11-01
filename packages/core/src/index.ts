@@ -23,7 +23,7 @@ export {
   type AgentProfile,
   type LinkGroup,
 } from "./agents.js";
-export { loadProfiles, readConfig, CONFIG_VERSION, type Config, type AgentConfig } from "./config.js";
+export { ensureConfig, loadProfiles, readConfig, CONFIG_VERSION, type Config, type AgentConfig } from "./config.js";
 export { hashSkillDir, hasUtf8Bom } from "./hash.js";
 export {
   scanStatus,

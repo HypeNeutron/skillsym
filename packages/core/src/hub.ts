@@ -1,6 +1,7 @@
 import { promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { ensureConfig } from "./config.js";
 import { ensureManifest } from "./manifest.js";
 
 export interface Hub {
@@ -47,12 +48,13 @@ export function hubPaths(home: string): Hub {
   };
 }
 
-/** Return the hub at `home`, creating its folders and an empty manifest on first use. */
+/** Return the hub at `home`, creating its folders, an empty manifest and a starter config on first use. */
 export async function openHub(home: string = resolveHubHome()): Promise<Hub> {
   const hub = hubPaths(home);
   await fs.mkdir(hub.skillsDir, { recursive: true });
   await fs.mkdir(hub.backupsDir, { recursive: true });
   await fs.mkdir(hub.tmpDir, { recursive: true });
   await ensureManifest(hub.manifestPath);
+  await ensureConfig(hub.configPath);
   return hub;
 }

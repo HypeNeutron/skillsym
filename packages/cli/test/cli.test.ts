@@ -212,6 +212,29 @@ describe("skillsym CLI", () => {
     expect(JSON.parse(broken.stdout).error.code).toBe("CONFIG_INVALID");
   });
 
+  it("creates a starter config once and never overwrites it; config lists every agent", async () => {
+    const file = path.join(home, "config.json");
+    expect(run(["config"]).stdout).toContain("not created yet");
+    await expect(fs.access(file)).rejects.toThrow();
+
+    expect(run(["add", await makeSkill(path.join(root, "src"), "coding")]).code).toBe(0);
+    expect(JSON.parse(await fs.readFile(file, "utf8"))).toEqual({ version: 1, agents: [] });
+
+    const custom = JSON.stringify({ version: 1, agents: [{ id: "windsurf", skillsDir: "~/.windsurf/skills" }] });
+    await fs.writeFile(file, custom);
+    run(["add", await makeSkill(path.join(root, "src"), "other")]);
+    expect(await fs.readFile(file, "utf8")).toBe(custom);
+
+    const report = JSON.parse(run(["config", "--json"]).stdout);
+    expect(report).toMatchObject({ configPath: file, exists: true });
+    expect(report.agents.find((a: { id: string }) => a.id === "claude").source).toBe("built-in");
+    expect(report.agents.find((a: { id: string }) => a.id === "windsurf")).toMatchObject({
+      source: "config",
+      skillsDir: path.join(root, "user", ".windsurf", "skills"),
+    });
+    expect(run(["config", "extra"]).code).toBe(2);
+  });
+
   it("import brings existing skills in; differing copies exit 1", async () => {
     const claudeSkills = path.join(root, "user", ".claude", "skills");
     await makeSkill(claudeSkills, "research");

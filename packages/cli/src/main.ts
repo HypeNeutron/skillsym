@@ -6,7 +6,9 @@ import { parseArgs } from "node:util";
 import {
   addSkill,
   assignSkills,
+  isAgentInstalled,
   loadProfiles,
+  readConfig,
   listSkills,
   openHub,
   hubPaths,
@@ -104,6 +106,7 @@ Commands:
   import --continue | --abort   Finish or drop an open merge
   remove, rm <skill...> [-a]    With -a: unassign those agents only. Without: remove from every agent
                                 and from the hub (asks first; the hub copy is moved to backups)
+  config                        Show the config file's location and every agent with its skills folder
   eject [--dry-run]             Stop using skillsym: replace every skillsym link with a real copy (asks first;
                                 the hub is kept, delete it yourself when you are sure)
 
@@ -341,6 +344,22 @@ async function run(argv: string[], io: Io, json: boolean): Promise<ExitCode> {
       if (json) io.stdout(JSON.stringify({ dryRun, ...report }));
       else io.stdout(formatEject(report, dryRun));
       return report.results.some((r) => r.outcome === "failed") ? 2 : 0;
+    }
+    case "config": {
+      if (rest.length) throw new UsageError(`config takes no arguments; edit ${hub.configPath} to add or change agents`);
+      const customIds = new Set((await readConfig(hub.configPath)).agents.map((a) => a.id));
+      const rows = await Promise.all(
+        profiles.map(async (p) => ({
+          id: p.id,
+          skillsDir: p.skillsDir,
+          source: customIds.has(p.id) ? ("config" as const) : ("built-in" as const),
+          installed: await isAgentInstalled(p),
+        })),
+      );
+      const exists = await isFile(hub.configPath);
+      if (json) io.stdout(JSON.stringify({ configPath: hub.configPath, exists, agents: rows }));
+      else io.stdout(formatConfig(hub.configPath, exists, rows));
+      return 0;
     }
     default:
       throw new UsageError(`Unknown command "${command}".\n\n${USAGE}`);
@@ -667,6 +686,18 @@ function formatLinks(results: AgentLinkResult[]): string {
       return r.reason ? `${line}\n                ${r.reason}` : line;
     })
     .join("\n");
+}
+
+function formatConfig(file: string, exists: boolean, rows: { id: string; skillsDir: string; source: string; installed: boolean }[]): string {
+  const width = Math.max(...rows.map((r) => r.id.length));
+  return [
+    `Config file: ${file}${exists ? "" : "  (not created yet; it appears the first time a command changes something)"}`,
+    "",
+    "Agents:",
+    ...rows.map((r) => `  ${r.id.padEnd(width)}  ${r.skillsDir}  (${r.source}${r.installed ? "" : ", not installed"})`),
+    "",
+    'To add an agent or change a folder, add to "agents" in the config file; see the README for the fields.',
+  ].join("\n");
 }
 
 const STATUS_HINT: Record<StatusReport["entries"][number]["status"], string> = {

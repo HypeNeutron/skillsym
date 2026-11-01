@@ -27,6 +27,19 @@ export interface Config {
 const ID_PATTERN = /^[a-z0-9][a-z0-9_-]{0,31}$/i;
 const RELOADS = ["live", "restart", "unknown"];
 
+/**
+ * Create a starter config only if none exists; never touch an existing one. It lists no agents:
+ * copying the built-in ones here would pin them and hide later fixes to their folders.
+ */
+export async function ensureConfig(file: string): Promise<void> {
+  const starter = `${JSON.stringify({ version: CONFIG_VERSION, agents: [] }, null, 2)}\n`;
+  try {
+    await fs.writeFile(file, starter, { encoding: "utf8", flag: "wx" });
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err;
+  }
+}
+
 export async function readConfig(file: string): Promise<Config> {
   let raw: string;
   try {

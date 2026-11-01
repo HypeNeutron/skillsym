@@ -10,7 +10,7 @@ First release: the command line tool.
   skill is assigned to, and a state file records every link skillsym created.
 - **Agents**: built-in Claude Code, Codex, Cursor and the shared `~/.agents/skills` folder; add or override agents
   in the hub's `config.json`. An agent that already reads another agent's folder (Cursor) gets no second link.
-- **Commands**: `init`, `add`, `assign`, `list`, `status`, `check`, `sync`, `import`, `remove`, `eject`.
+- **Commands**: `init`, `add`, `assign`, `list`, `status`, `check`, `sync`, `import`, `remove`, `config`, `eject`.
 - **Links**: junctions on Windows (no administrator rights or Developer Mode), symlinks on macOS and Linux.
 - **Drift**: `status` / `check` classify every link (synced, covered, missing, dangling, replaced, blocked,
   orphaned, duplicate, source-missing) and list unmanaged skills; `sync` repairs what it can and asks about the rest

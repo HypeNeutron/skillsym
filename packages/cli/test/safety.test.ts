@@ -191,6 +191,7 @@ describe("commands that only look", () => {
       ["status"],
       ["check"],
       ["list"],
+      ["config"],
       ["sync", "--dry-run"],
       ["import", "--dry-run"],
       ["eject", "--dry-run"],

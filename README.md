@@ -61,7 +61,8 @@ npm install -g skillsym
 ## How it works
 
 - The **hub** is a folder (`~/.skillsym`, or wherever `SKILLSYM_HOME` points). It holds the real skill folders,
-  a `manifest.json` that says which skill goes to which agent, and a `state.json` listing every link skillsym created.
+  a `manifest.json` that says which skill goes to which agent, a `state.json` listing every link skillsym created,
+  and a `config.json` for your own agents.
 - Each agent's skills folder gets a **link** to the hub copy. A link is not a copy: the agent reads the files
   in the hub. Deleting a link never deletes the skill.
 - `sync` makes the agents' folders match the manifest. It runs again safely: a second run changes nothing.
@@ -75,8 +76,9 @@ npm install -g skillsym
 | `cursor` | `~/.cursor/skills` | Also reads `~/.claude/skills`, `~/.codex/skills` and `~/.agents/skills`, so it is usually *covered* by another agent's link. Reloads skills only when restarted. |
 | `universal` | `~/.agents/skills` | The shared folder several agents read. |
 
-Use `-a '*'` for every agent installed on this machine. To add another agent, or change a path, create
-`config.json` in the hub folder:
+Use `-a '*'` for every agent installed on this machine. `skillsym config` shows every agent and its folder. To add
+another agent, or change a path, edit `config.json` in the hub folder. skillsym creates it with an empty `agents`
+list, because built-in agents need no entry there:
 
 ```json
 {
@@ -108,6 +110,7 @@ from, so skillsym does not give it a second copy of a skill it already sees.
 | `skillsym import --continue` / `--abort` | Finish or drop an open merge. |
 | `skillsym remove <skill...> -a <agents>` | Unassign a skill from some agents. |
 | `skillsym remove <skill...>` / `rm` | Remove a skill from every agent and from the hub (the hub copy is moved to backups; a linked library is never touched). |
+| `skillsym config` | Show the config file's location and every agent with its skills folder. |
 | `skillsym eject [--dry-run]` | Stop using skillsym: replace every link with a real copy. |
 
 Options:
