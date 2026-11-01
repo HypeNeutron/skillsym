@@ -22,8 +22,13 @@ export async function withLock<T>(lockPath: string, fn: () => Promise<T>, option
   try {
     return await fn();
   } finally {
-    await fs.rm(lockPath, { force: true });
+    await removeLock(lockPath);
   }
+}
+
+/** Windows can briefly refuse to delete a file another process is opening; rm retries those errors. */
+function removeLock(lockPath: string): Promise<void> {
+  return fs.rm(lockPath, { force: true, maxRetries: 5, retryDelay: 20 });
 }
 
 async function acquire(lockPath: string, options: LockOptions): Promise<void> {
@@ -37,10 +42,13 @@ async function acquire(lockPath: string, options: LockOptions): Promise<void> {
       await fs.writeFile(lockPath, JSON.stringify(info), { encoding: "utf8", flag: "wx" });
       return;
     } catch (err) {
-      if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err;
+      const code = (err as NodeJS.ErrnoException).code;
+      // On Windows, opening a lock file that is being deleted fails with EPERM: it is about to be free.
+      const beingDeleted = process.platform === "win32" && code === "EPERM";
+      if (code !== "EEXIST" && !(beingDeleted && Date.now() < deadline)) throw err;
     }
     if (await isStale(lockPath)) {
-      await fs.rm(lockPath, { force: true });
+      await removeLock(lockPath);
       continue;
     }
     if (Date.now() >= deadline) {

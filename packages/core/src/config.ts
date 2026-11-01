@@ -3,6 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import { builtinAgents, type AgentProfile } from "./agents.js";
 import { SkillsymError } from "./errors.js";
+import { writeFileIfAbsent } from "./fsutil.js";
 import type { Hub } from "./hub.js";
 
 export const CONFIG_VERSION = 1;
@@ -33,11 +34,7 @@ const RELOADS = ["live", "restart", "unknown"];
  */
 export async function ensureConfig(file: string): Promise<void> {
   const starter = `${JSON.stringify({ version: CONFIG_VERSION, agents: [] }, null, 2)}\n`;
-  try {
-    await fs.writeFile(file, starter, { encoding: "utf8", flag: "wx" });
-  } catch (err) {
-    if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err;
-  }
+  await writeFileIfAbsent(file, starter);
 }
 
 export async function readConfig(file: string): Promise<Config> {

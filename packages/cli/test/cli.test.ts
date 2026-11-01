@@ -327,10 +327,11 @@ describe("skillsym CLI", () => {
   });
 
   it("serializes concurrent adds from separate processes", async () => {
-    const names = ["a1", "a2", "a3", "a4"];
+    // Enough processes to hit first-use races: half-written hub files, and Windows' EPERM on a lock being deleted.
+    const names = ["a1", "a2", "a3", "a4", "a5", "a6", "a7", "a8"];
     const srcs = await Promise.all(names.map((n) => makeSkill(path.join(root, "src"), n)));
     const results = await Promise.all(srcs.map((s) => runAsync(["add", s, "--json"])));
-    expect(results.map((r) => r.code)).toEqual([0, 0, 0, 0]);
+    expect(results.map((r) => r.code)).toEqual(names.map(() => 0));
     const listed = JSON.parse(run(["list", "--json"]).stdout).skills.map((s: { name: string }) => s.name);
     expect(listed).toEqual(names);
   });

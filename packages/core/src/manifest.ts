@@ -1,6 +1,6 @@
 import { promises as fs } from "node:fs";
 import { SkillsymError } from "./errors.js";
-import { writeFileAtomic } from "./fsutil.js";
+import { writeFileAtomic, writeFileIfAbsent } from "./fsutil.js";
 
 export const MANIFEST_VERSION = 1;
 
@@ -38,11 +38,7 @@ export function emptyManifest(): Manifest {
 
 /** Create the manifest only if it does not exist yet; never touch an existing one. */
 export async function ensureManifest(file: string): Promise<void> {
-  try {
-    await fs.writeFile(file, serialize(emptyManifest()), { encoding: "utf8", flag: "wx" });
-  } catch (err) {
-    if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err;
-  }
+  await writeFileIfAbsent(file, serialize(emptyManifest()));
 }
 
 /**

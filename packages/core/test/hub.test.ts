@@ -3,7 +3,7 @@ import { promises as fs } from "node:fs";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { addSkill, listSkills, openHub, readManifest, resolveHubHome, SkillsymError } from "../src/index.js";
-import { isDirectory, isFile, isMissing } from "../src/fsutil.js";
+import { isDirectory, isFile, isMissing, writeFileIfAbsent } from "../src/fsutil.js";
 import { listDir, makeSkill, makeTempDir, removeDir } from "./helpers.js";
 
 let root: string;
@@ -175,5 +175,33 @@ describe("hub lock", () => {
     await addSkill(hub, await makeSkill(sources, "coding"));
     await expectCode(addSkill(hub, await makeSkill(path.join(root, "dup"), "coding")), "SKILL_EXISTS");
     expect(await listDir(home)).not.toContain(".lock");
+  });
+});
+
+describe("writeFileIfAbsent", () => {
+  it("creates the file, never overwrites one, and leaves no temp files", async () => {
+    const dir = await makeTempDir("skillsym-absent-");
+    try {
+      const file = path.join(dir, "config.json");
+      await writeFileIfAbsent(file, "first");
+      await writeFileIfAbsent(file, "second");
+      expect(await fs.readFile(file, "utf8")).toBe("first");
+      expect(await fs.readdir(dir)).toEqual(["config.json"]);
+    } finally {
+      await removeDir(dir);
+    }
+  });
+
+  it("is complete for every reader when many writers race", async () => {
+    const dir = await makeTempDir("skillsym-absent-");
+    try {
+      const file = path.join(dir, "config.json");
+      const text = "x".repeat(100_000);
+      await Promise.all(Array.from({ length: 20 }, () => writeFileIfAbsent(file, text)));
+      expect(await fs.readFile(file, "utf8")).toBe(text);
+      expect(await fs.readdir(dir)).toEqual(["config.json"]);
+    } finally {
+      await removeDir(dir);
+    }
   });
 });
