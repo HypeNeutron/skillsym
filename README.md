@@ -73,7 +73,7 @@ npm install -g skillsym
 | id | Skills folder | Notes |
 |---|---|---|
 | `claude` | `~/.claude/skills` | Picks up edits immediately. |
-| `codex` | `~/.agents/skills` | Also reads `~/.codex/skills`. Rejects a `SKILL.md` that starts with a UTF-8 BOM; skillsym warns about those. |
+| `codex` | `~/.agents/skills` | Also reads `~/.codex/skills`; `import` moves skills found there into the hub and links them from `~/.agents/skills`. Rejects a `SKILL.md` that starts with a UTF-8 BOM; skillsym warns about those. |
 | `cursor` | `~/.cursor/skills` | Also reads `~/.claude/skills`, `~/.codex/skills` and `~/.agents/skills`, so it is usually *covered* by another agent's link. Reloads skills only when restarted. |
 | `universal` | `~/.agents/skills` | The shared folder several agents read. |
 
@@ -103,11 +103,13 @@ from, so skillsym does not give it a second copy of a skill it already sees.
 | `skillsym add <library> [-a agents] [--dry-run]` | A folder of skills: copy every skill in it (any depth; `.git` and `node_modules` are skipped). The library is not changed. |
 | `skillsym add <library> --link [-a agents]` | Link the hub to your library instead of copying it. Run it again to pick up new skills, or to point at the library's new location after you move it. |
 | `skillsym assign <skill...> -a <agents>` | Link hub skills into agents' folders. |
-| `skillsym list` / `ls` | List hub skills, their agents, and where linked skills come from. |
-| `skillsym status` | Show the state of every link, unmanaged skills, and news from linked libraries. |
+| `skillsym list [-a agents]` / `ls` | List hub skills, their agents, and where linked skills come from. |
+| `skillsym open <skill>` | Print a skill's folder and open it in `$EDITOR`, or your file manager. A `--link` skill opens in your library. |
+| `skillsym status [--all]` | Show what needs attention, unmanaged skills, news from linked libraries, and a count. `--all` also lists links that are fine. |
 | `skillsym check` | Same as `status`, but exits 1 if anything is not in sync (for CI and scripts). |
 | `skillsym sync [--dry-run]` | Repair drift. Fixes what it can decide alone and asks about the rest. |
 | `skillsym import [--dry-run]` | Move skills found in agents' folders into the hub. |
+| `skillsym import <skill...> [-a agents]` / `import -a <agents>` | Only those skills, or only copies in those agents' folders. Other agents' copies are not compared or touched. |
 | `skillsym import --continue` / `--abort` | Finish or drop an open merge. |
 | `skillsym remove <skill...> -a <agents>` | Unassign a skill from some agents. |
 | `skillsym remove <skill...>` / `rm` | Remove a skill from every agent and from the hub (the hub copy is moved to backups; a linked library is never touched). |
@@ -121,7 +123,7 @@ Options:
 |---|---|
 | `-a, --agent <ids>` | Agent ids, comma-separated or repeated; `'*'` = every installed agent. |
 | `-s, --skill <name>` | Skill names (instead of positional names); `'*'` = every skill in the hub. |
-| `--all` | Every skill to every installed agent (`-s '*' -a '*'`). |
+| `--all` | `add`, `assign`, `remove`: every skill to every installed agent (`-s '*' -a '*'`). `status`, `check`: list every link. |
 | `--dry-run` | Show what would change; change nothing. |
 | `--link` | With `add`: link to your library instead of copying it. |
 | `-y, --yes` | Never ask. Conflicts are reported and left alone; `remove` and `eject` proceed. |
@@ -130,6 +132,8 @@ Options:
 | `--json` | Machine-readable output. |
 | `-h, --help` | Show the commands and options. |
 | `-v, --version` | Show the version. |
+
+A command refuses an option it does not act on, rather than ignoring it.
 
 Exit codes: `0` done, nothing to fix · `1` something needs your attention (drift, a conflict you skipped, a
 skipped skill) · `2` an error. With `--json`, errors are printed as `{"error": {"code", "message"}}`.

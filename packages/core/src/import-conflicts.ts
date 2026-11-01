@@ -103,7 +103,7 @@ export async function resolveImportConflicts(hub: Hub, decisions: ImportDecision
   return withLock(
     hub.lockPath,
     async () => {
-      const plan = await planImport(hub, { profiles });
+      const plan = await planImport(hub, { ...options, profiles });
       const results: ImportDecisionResult[] = [];
       for (const d of decisions) {
         const result: ImportDecisionResult = { name: d.name, choice: d.choice, ok: true, backups: [], linked: [] };

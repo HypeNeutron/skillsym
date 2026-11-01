@@ -1,6 +1,6 @@
 import path from "node:path";
 import { builtinAgents, groupBySkillsDir, resolveAgents, type AgentProfile } from "./agents.js";
-import { moveToBackup } from "./backup.js";
+import { backupStamp, moveToBackup } from "./backup.js";
 import { SkillsymError } from "./errors.js";
 import { isDirectory, pathExists } from "./fsutil.js";
 import type { Hub } from "./hub.js";
@@ -75,8 +75,9 @@ export async function removeSkills(hub: Hub, options: RemoveOptions): Promise<Re
       }
 
       const result: RemoveResult = { links: [], removedSkills: [] };
+      const stamp = backupStamp();
       for (const name of names) {
-        await removeOne(hub, manifest, state, profiles, name, dropIds, options.dryRun ?? false, result);
+        await removeOne(hub, manifest, state, profiles, name, dropIds, options.dryRun ?? false, result, stamp);
       }
       if (!options.dryRun) {
         await writeState(hub.statePath, state);
@@ -97,6 +98,7 @@ async function removeOne(
   dropIds: string[] | undefined,
   dryRun: boolean,
   result: RemoveResult,
+  stamp: string,
 ): Promise<void> {
   const entry = manifest.skills[name]!;
   const target = path.join(hub.skillsDir, name);
@@ -132,7 +134,7 @@ async function removeOne(
       if (entry.mode === "source-link") {
         // The hub entry is only a link into the user's library: remove the link, never the library.
         if ((await readLinkTarget(target)) !== null) await removeDirLink(target);
-      } else if (await isDirectory(target)) removed.backup = await moveToBackup(hub, target, "removed", name);
+      } else if (await isDirectory(target)) removed.backup = await moveToBackup(hub, target, "removed", name, stamp);
       forgetLibrarySkill(manifest, name);
       delete manifest.skills[name];
     }

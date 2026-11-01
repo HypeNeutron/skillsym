@@ -2,7 +2,7 @@ import { randomBytes } from "node:crypto";
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import { builtinAgents, resolveAgents, type AgentProfile } from "./agents.js";
-import { moveToBackup } from "./backup.js";
+import { backupStamp, moveToBackup } from "./backup.js";
 import { SkillsymError } from "./errors.js";
 import { isDirectory, pathExists } from "./fsutil.js";
 import type { Hub } from "./hub.js";
@@ -131,6 +131,7 @@ async function ejectSelected(hub: Hub, options: EjectOptions): Promise<EjectRepo
     }
 
     const report: EjectReport = { results: [], hubHome: hub.home, leftHub: [] };
+    const stamp = backupStamp();
     for (const name of names) {
       const entry = manifest.skills[name]!;
       const drop = chosen ? entry.agents.filter((a) => chosen.includes(a)) : [...entry.agents];
@@ -165,7 +166,7 @@ async function ejectSelected(hub: Hub, options: EjectOptions): Promise<EjectRepo
       const remaining = keep.filter((p) => !satisfied.includes(p)).map((p) => p.id);
       const touched = drop.length > 0 || links.length > 0;
       const linksLeft = state.links.some((l) => l.skill === name);
-      if (touched && !remaining.length && !linksLeft) report.leftHub.push(await leaveHub(hub, manifest, name, dryRun));
+      if (touched && !remaining.length && !linksLeft) report.leftHub.push(await leaveHub(hub, manifest, name, dryRun, stamp));
       else if (!dryRun && touched) entry.agents = remaining;
     }
     if (!dryRun) {
@@ -208,7 +209,7 @@ async function ejectLink(hub: Hub, state: State, link: StateLink, dryRun: boolea
 }
 
 /** No agent uses this skill through skillsym any more: take it out of the hub without deleting anything. */
-async function leaveHub(hub: Hub, manifest: Manifest, name: string, dryRun: boolean): Promise<EjectedSkill> {
+async function leaveHub(hub: Hub, manifest: Manifest, name: string, dryRun: boolean, stamp: string): Promise<EjectedSkill> {
   const entry = manifest.skills[name]!;
   const target = path.join(hub.skillsDir, name);
   const left: EjectedSkill = { skill: name };
@@ -217,7 +218,7 @@ async function leaveHub(hub: Hub, manifest: Manifest, name: string, dryRun: bool
   if (entry.mode === "source-link") {
     if ((await readLinkTarget(target)) !== null) await removeDirLink(target);
   } else if (await isDirectory(target)) {
-    left.backup = await moveToBackup(hub, target, "ejected", name);
+    left.backup = await moveToBackup(hub, target, "ejected", name, stamp);
   }
   forgetLibrarySkill(manifest, name);
   delete manifest.skills[name];

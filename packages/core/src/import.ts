@@ -1,8 +1,9 @@
 import { randomBytes } from "node:crypto";
 import { promises as fs } from "node:fs";
 import path from "node:path";
-import { builtinAgents, planLinkGroups, type AgentProfile } from "./agents.js";
-import { moveToBackup } from "./backup.js";
+import { builtinAgents, planLinkGroups, resolveAgents, type AgentProfile } from "./agents.js";
+import { backupStamp, moveToBackup } from "./backup.js";
+import { SkillsymError } from "./errors.js";
 import { isDirectory, isFile } from "./fsutil.js";
 import { hashSkillDir, hasUtf8Bom } from "./hash.js";
 import type { Hub } from "./hub.js";
@@ -60,6 +61,10 @@ export interface ImportResult {
 
 export interface ImportOptions {
   profiles?: AgentProfile[];
+  /** Only these skills ("*" = all). */
+  skills?: string[];
+  /** Only copies found in these agents' folders. Other agents' copies are not compared or touched. */
+  agents?: string[];
   lock?: LockOptions;
 }
 
@@ -71,6 +76,8 @@ export async function planImport(hub: Hub, options: ImportOptions = {}): Promise
   const profiles = options.profiles ?? builtinAgents();
   const report = await scanStatus(hub, { profiles });
   const manifest = await readManifest(hub.manifestPath);
+  const chosen = options.agents?.length ? (await resolveAgents(options.agents, profiles)).map((a) => a.id) : undefined;
+  const wanted = options.skills?.length && !options.skills.includes("*") ? new Set(options.skills) : undefined;
 
   const byName = new Map<string, ImportSource[]>();
   const items: ImportItem[] = [];
@@ -95,6 +102,9 @@ export async function planImport(hub: Hub, options: ImportOptions = {}): Promise
   for (const e of report.entries) if (!e.owned && e.linkTarget) foreignTargets.push(e.linkTarget);
 
   for (const u of candidates) {
+    if (wanted && !wanted.has(u.name)) continue;
+    const agents = chosen ? u.agents.filter((a) => chosen.includes(a)) : u.agents;
+    if (!agents.length) continue;
     if (u.isLink) {
       items.push({
         name: u.name,
@@ -114,7 +124,7 @@ export async function planImport(hub: Hub, options: ImportOptions = {}): Promise
       continue;
     }
     const skillMd = await fs.readFile(path.join(u.path, "SKILL.md"));
-    const source: ImportSource = { path: u.path, agents: u.agents, hash: await hashSkillDir(u.path), bom: hasUtf8Bom(skillMd) };
+    const source: ImportSource = { path: u.path, agents, hash: await hashSkillDir(u.path), bom: hasUtf8Bom(skillMd) };
     byName.set(u.name, [...(byName.get(u.name) ?? []), source]);
   }
 
@@ -138,6 +148,12 @@ export async function planImport(hub: Hub, options: ImportOptions = {}): Promise
     }
   }
   items.sort((a, b) => a.name.localeCompare(b.name));
+  for (const name of wanted ?? []) {
+    if (!items.some((item) => item.name === name)) {
+      const where = chosen ? `${chosen.join(", ")}'s folder` : "any agent's folder";
+      throw new SkillsymError("NOTHING_TO_IMPORT", `No skill named "${name}" to import from ${where}. \`skillsym status\` lists what can be imported.`, { skill: name });
+    }
+  }
   return { items };
 }
 
@@ -151,14 +167,15 @@ export async function importSkills(hub: Hub, options: ImportOptions = {}): Promi
   return withLock(
     hub.lockPath,
     async () => {
-      const plan = await planImport(hub, { profiles });
+      const plan = await planImport(hub, { ...options, profiles });
       const results: ImportItemResult[] = [];
+      const stamp = backupStamp();
       for (const item of plan.items) {
         const result: ImportItemResult = { ...item, ok: true, backups: [], linked: [] };
         results.push(result);
         if (item.type !== "import" && item.type !== "link-existing") continue;
         try {
-          await importOne(hub, profiles, item, result);
+          await importOne(hub, profiles, item, result, stamp);
         } catch (err) {
           result.ok = false;
           result.error = (err as Error).message;
@@ -170,10 +187,10 @@ export async function importSkills(hub: Hub, options: ImportOptions = {}): Promi
   );
 }
 
-async function importOne(hub: Hub, profiles: AgentProfile[], item: ImportItem, result: ImportItemResult): Promise<void> {
+async function importOne(hub: Hub, profiles: AgentProfile[], item: ImportItem, result: ImportItemResult, stamp: string): Promise<void> {
   if (item.type === "import") await placeInHub(hub, item.name, item.sources[0]!.path);
   await assignInManifest(hub, item.name, item.sources.flatMap((s) => s.agents));
-  await replaceWithLinks(hub, profiles, item.name, item.sources, result);
+  await replaceWithLinks(hub, profiles, item.name, item.sources, result, stamp);
 }
 
 /** Copy `from` into the hub as `skill` (staged, then renamed) and add a manifest entry if missing. */
@@ -204,22 +221,43 @@ export async function replaceWithLinks(
   skill: string,
   sources: { path: string; agents: string[] }[],
   result: { backups: string[]; linked: string[] },
+  stamp?: string,
 ): Promise<void> {
   const target = path.join(hub.skillsDir, skill);
   const manifest = await readManifest(hub.manifestPath);
   const state = await readState(hub.statePath);
   const assigned = profiles.filter((p) => manifest.skills[skill]?.agents.includes(p.id));
   const healthy: string[] = [];
+  const moved = new Set<string>();
+  const mainDirs = profiles.map((p) => p.skillsDir);
   for (const group of planLinkGroups(assigned)) {
     const linkPath = path.join(group.dir, skill);
-    const source = sources.find((s) => samePath(path.dirname(s.path), group.dir));
-    if (!source) {
+    // This folder's own copy, plus copies in a folder no agent links into that this group's agents
+    // also read (~/.codex/skills): those are replaced by the link in the agent's main folder.
+    const here = sources.filter((s) => {
+      if (moved.has(s.path)) return false;
+      const dir = path.dirname(s.path);
+      if (samePath(dir, group.dir)) return true;
+      if (mainDirs.some((m) => samePath(m, dir))) return false;
+      return assigned.some((p) => samePath(p.skillsDir, group.dir) && p.alsoReads.some((d) => samePath(d, dir)));
+    });
+    if (!here.length) {
       const onDisk = await readLinkTarget(linkPath);
       if (onDisk && samePath(onDisk, target)) healthy.push(group.dir);
       continue;
     }
-    result.backups.push(await moveToBackup(hub, source.path, `import-${source.agents.join("+")}`, path.basename(source.path)));
+    for (const source of here) {
+      moved.add(source.path);
+      result.backups.push(await moveToBackup(hub, source.path, `import-${source.agents.join("+")}`, path.basename(source.path), stamp));
+    }
+    const onDisk = await readLinkTarget(linkPath);
+    if (onDisk && samePath(onDisk, target)) {
+      healthy.push(group.dir);
+      continue;
+    }
     if (group.coveredBy && healthy.some((d) => samePath(d, group.coveredBy!.dir))) continue;
+    // The folder may not exist yet when the copy came from one the agent only also reads.
+    await fs.mkdir(group.dir, { recursive: true });
     await recordStateLink(state, linkPath, skill, target, await createDirLink(target, linkPath));
     await writeState(hub.statePath, state);
     result.linked.push(linkPath);

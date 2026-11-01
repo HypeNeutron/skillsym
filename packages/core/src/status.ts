@@ -225,7 +225,7 @@ async function sameContent(a: string, b: string): Promise<boolean> {
 
 async function findUnmanaged(profiles: AgentProfile[], known: string[]): Promise<UnmanagedEntry[]> {
   const found: UnmanagedEntry[] = [];
-  for (const group of groupBySkillsDir(profiles)) {
+  for (const group of [...groupBySkillsDir(profiles), ...extraReadDirs(profiles)]) {
     let names: string[];
     try {
       names = await fs.readdir(group.dir);
@@ -243,6 +243,24 @@ async function findUnmanaged(profiles: AgentProfile[], known: string[]): Promise
     }
   }
   return found;
+}
+
+/**
+ * Folders agents load skills from that are no agent's main folder, such as ~/.codex/skills. Skills
+ * kept there count as unmanaged too, or import would miss them and agents would load them twice.
+ */
+function extraReadDirs(profiles: AgentProfile[]): { dir: string; agents: AgentProfile[] }[] {
+  const main = profiles.map((p) => p.skillsDir);
+  const extras: { dir: string; agents: AgentProfile[] }[] = [];
+  for (const profile of profiles) {
+    for (const dir of profile.alsoReads) {
+      if (main.some((m) => samePath(m, dir))) continue;
+      const known = extras.find((x) => samePath(x.dir, dir));
+      if (known) known.agents.push(profile);
+      else extras.push({ dir, agents: [profile] });
+    }
+  }
+  return extras;
 }
 
 async function hasBom(file: string): Promise<boolean> {

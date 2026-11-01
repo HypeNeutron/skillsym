@@ -40,6 +40,14 @@ function runAsync(args: string[]): Promise<{ code: number | null; stdout: string
   });
 }
 
+async function removeDirLink(p: string): Promise<void> {
+  try {
+    await fs.unlink(p);
+  } catch {
+    await fs.rmdir(p);
+  }
+}
+
 describe("skillsym CLI", () => {
   it("creates the hub on first run and lists nothing", () => {
     const r = run(["list", "--json"]);
@@ -253,6 +261,123 @@ describe("skillsym CLI", () => {
     const conflict = run(["import"]);
     expect(conflict.code).toBe(1);
     expect(conflict.stdout).toContain("CONFLICT  coding");
+  });
+
+  it("refuses an option the command does not act on, changing nothing", async () => {
+    run(["add", await makeSkill(path.join(root, "src"), "coding"), "-a", "claude"]);
+    for (const args of [["sync", "-a", "codex"], ["status", "--dry-run"], ["list", "--link"], ["eject", "--all"], ["config", "-y"]]) {
+      const r = run(args);
+      expect(r.code, args.join(" ")).toBe(2);
+      expect(r.stderr).toContain(`does not take --`);
+    }
+    expect(run(["check"]).code).toBe(0);
+    expect(run(["add", await makeSkill(path.join(root, "src"), "other"), "-y"]).code).toBe(0);
+  });
+
+  it("status shows what needs attention and a count; --all lists every link; --json stays complete", async () => {
+    run(["add", await makeSkill(path.join(root, "src"), "coding"), "-a", "claude"]);
+    run(["add", await makeSkill(path.join(root, "src"), "other"), "-a", "claude"]);
+    const quiet = run(["status"]).stdout;
+    expect(quiet).not.toContain("coding");
+    expect(quiet).toContain("2 synced.");
+    expect(quiet).toContain("status --all");
+    expect(run(["status", "--all"]).stdout).toContain("coding -> claude");
+    expect(JSON.parse(run(["status", "--json"]).stdout).entries).toHaveLength(2);
+
+    await removeDirLink(path.join(root, "user", ".claude", "skills", "other"));
+    const drift = run(["status"]).stdout;
+    expect(drift).toContain("MISSING   other");
+    expect(drift).not.toContain("coding");
+  });
+
+  it("list -a shows one agent's skills", async () => {
+    run(["add", await makeSkill(path.join(root, "src"), "coding"), "-a", "claude"]);
+    run(["add", await makeSkill(path.join(root, "src"), "other"), "-a", "codex"]);
+    const names = (args: string[]) => JSON.parse(run(args).stdout).skills.map((s: { name: string }) => s.name);
+    expect(names(["list", "--json"])).toEqual(["coding", "other"]);
+    expect(names(["list", "-a", "codex", "--json"])).toEqual(["other"]);
+    expect(run(["list", "-a", "universal"]).stdout).toContain("No skills assigned to universal");
+    expect(run(["list", "-a", "nope"]).code).toBe(2);
+  });
+
+  it("open prints the skill's folder without a terminal, and the library for a --link skill", async () => {
+    run(["add", await makeSkill(path.join(root, "src"), "coding")]);
+    expect(run(["open", "coding"]).stdout.trim()).toBe(path.join(home, "skills", "coding"));
+    expect(run(["open", "nope"]).code).toBe(2);
+    expect(run(["open"]).code).toBe(2);
+
+    const library = path.join(root, "lib");
+    const linked = await makeSkill(library, "linked");
+    run(["add", library, "--link"]);
+    expect(JSON.parse(run(["open", "linked", "--json"]).stdout)).toEqual({ skill: "linked", path: linked });
+  });
+
+  describe("import, choosing what", () => {
+    const claudeDir = () => path.join(root, "user", ".claude", "skills");
+    const agentsDir = () => path.join(root, "user", ".agents", "skills");
+    const isLink = async (p: string) => (await fs.lstat(p)).isSymbolicLink();
+
+    it("takes skill names and leaves the rest alone", async () => {
+      await makeSkill(claudeDir(), "one");
+      await makeSkill(claudeDir(), "two");
+      expect(run(["import", "one"]).code).toBe(0);
+      expect(await isLink(path.join(claudeDir(), "one"))).toBe(true);
+      expect(await isLink(path.join(claudeDir(), "two"))).toBe(false);
+      const missing = run(["import", "nope"]);
+      expect(missing.code).toBe(2);
+      expect(missing.stderr).toContain("nope");
+    });
+
+    it("-a imports only that agent's copy: the other copy is not compared or touched", async () => {
+      await makeSkill(claudeDir(), "shared", { "a.md": "claude" });
+      await makeSkill(agentsDir(), "shared", { "a.md": "codex" });
+      expect(run(["import", "--dry-run"]).code).toBe(1);
+
+      const r = run(["import", "-a", "claude", "--json"]);
+      expect(r.code).toBe(0);
+      expect(JSON.parse(r.stdout).items).toMatchObject([{ name: "shared", type: "import", ok: true }]);
+      expect(await isLink(path.join(claudeDir(), "shared"))).toBe(true);
+      expect(await isLink(path.join(agentsDir(), "shared"))).toBe(false);
+      expect(await fs.readFile(path.join(agentsDir(), "shared", "a.md"), "utf8")).toBe("codex");
+      expect(await fs.readFile(path.join(home, "skills", "shared", "a.md"), "utf8")).toBe("claude");
+    });
+
+    it("refuses names with --continue or --abort", () => {
+      expect(run(["import", "one", "--abort"]).code).toBe(2);
+      expect(run(["import", "--continue", "-a", "claude"]).code).toBe(2);
+    });
+
+    it("keeps one import's backups in one folder", async () => {
+      for (const n of ["one", "two", "three"]) await makeSkill(claudeDir(), n);
+      expect(run(["import"]).code).toBe(0);
+      const stamps = await fs.readdir(path.join(home, "backups"));
+      expect(stamps).toHaveLength(1);
+      expect((await fs.readdir(path.join(home, "backups", stamps[0]!, "import-claude"))).sort()).toEqual(["one", "three", "two"]);
+    });
+
+    it("finds skills kept in ~/.codex/skills, skips .system, and links them from ~/.agents/skills", async () => {
+      const codexDir = path.join(root, "user", ".codex", "skills");
+      await makeSkill(codexDir, "mine", { "a.md": "x" });
+      await makeSkill(codexDir, ".system");
+      expect(run(["status"]).stdout).toContain("unmanaged mine");
+
+      expect(run(["import"]).code).toBe(0);
+      await expect(fs.lstat(path.join(codexDir, "mine"))).rejects.toThrow();
+      expect(await isLink(path.join(agentsDir(), "mine"))).toBe(true);
+      expect(await fs.readFile(path.join(home, "skills", "mine", "a.md"), "utf8")).toBe("x");
+      await fs.access(path.join(codexDir, ".system", "SKILL.md"));
+      expect(run(["check"]).code).toBe(0);
+    });
+
+    it("a copy in ~/.codex/skills identical to the hub's is replaced without a second link", async () => {
+      run(["add", await makeSkill(path.join(root, "src"), "mine", { "a.md": "same" }), "-a", "codex"]);
+      await makeSkill(path.join(root, "user", ".codex", "skills"), "mine", { "a.md": "same" });
+
+      expect(run(["import"]).code).toBe(0);
+      await expect(fs.lstat(path.join(root, "user", ".codex", "skills", "mine"))).rejects.toThrow();
+      expect(await isLink(path.join(agentsDir(), "mine"))).toBe(true);
+      expect(run(["check"]).code).toBe(0);
+    });
   });
 
   it("eject by skill or agent changes only those links; -a is never ignored", async () => {
