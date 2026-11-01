@@ -146,6 +146,8 @@ describe("skillsym CLI", () => {
     const status = run(["status"]);
     expect(status.code).toBe(0);
     expect(status.stdout).toContain("MISSING");
+    // Our own link was removed: say what sync really does (it asks), not "will link it".
+    expect(status.stdout).toContain("`skillsym sync` will ask whether to restore it");
     expect(status.stdout).toContain("Drift found");
   });
 
