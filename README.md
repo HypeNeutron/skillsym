@@ -52,7 +52,8 @@ npx skillsym add ~/my-skills -a claude          # copy every skill in it; the hu
 npx skillsym add ~/my-skills --link -a claude   # or: link to it, so your library stays the source of truth
 ```
 
-Install it globally if you prefer `skillsym` over `npx skillsym`:
+Install it globally if you prefer `skillsym` over `npx skillsym`. That also gives you `ssym`, the short name for
+the same command (`ssym status`, `ssym sync`):
 
 ```bash
 npm install -g skillsym

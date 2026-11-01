@@ -86,7 +86,7 @@ export class PromptCancelled extends Error {
 
 const PROMPT_KEYS = "Enter = skip · q = skip all the rest · Ctrl+C = cancel without applying any answer";
 
-const USAGE = `Usage: skillsym <command> [options]
+const USAGE = `Usage: skillsym <command> [options]   (ssym is the short name, once installed globally)
 
 Commands:
   init [name]                   Create a SKILL.md template (in ./<name>, or here without a name)

@@ -27,6 +27,13 @@ function helpOptions(): Set<string> {
 }
 
 describe("README matches the real CLI", () => {
+  it("ssym is the same program as skillsym", () => {
+    const { bin } = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
+    expect(bin.ssym).toBe(bin.skillsym);
+    expect(README).toContain("`ssym`");
+    expect(HELP).toContain("ssym");
+  });
+
   it("every `skillsym <command>` in the README's code is a real command", () => {
     const commands = helpCommands();
     // Commands appear in code blocks and inline code; "skillsym" in prose is the product name.

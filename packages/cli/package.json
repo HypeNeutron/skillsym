@@ -24,7 +24,8 @@
   },
   "type": "module",
   "bin": {
-    "skillsym": "./dist/index.js"
+    "skillsym": "./dist/index.js",
+    "ssym": "./dist/index.js"
   },
   "files": [
     "dist",
