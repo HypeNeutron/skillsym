@@ -443,7 +443,11 @@ describe("skillsym CLI", () => {
     await fs.mkdir(work);
     const r = spawnSync(process.execPath, [BIN, "config", "add", "here", "skills"], { encoding: "utf8", env: env(), cwd: work });
     expect(r.status).toBe(0);
-    expect(JSON.parse(await fs.readFile(path.join(home, "config.json"), "utf8")).agents[0].skillsDir).toBe(path.join(await fs.realpath(work), "skills"));
+    const { skillsDir } = JSON.parse(await fs.readFile(path.join(home, "config.json"), "utf8")).agents[0];
+    expect(path.isAbsolute(skillsDir)).toBe(true);
+    expect(path.basename(skillsDir)).toBe("skills");
+    // Compare real paths: the same folder can be spelled RUNNER~1 on Windows, or /private/var on macOS.
+    expect(await fs.realpath(path.dirname(skillsDir))).toBe(await fs.realpath(work));
   });
 
   it("sync acts only on the skills and agents named", async () => {
