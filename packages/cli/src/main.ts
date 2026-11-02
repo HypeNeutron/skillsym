@@ -39,6 +39,15 @@ import {
   type LibraryItem,
   resolveConflicts,
   scanStatus,
+  type UnlinkResult,
+  type LibraryInfo,
+  readManifest,
+  unlinkLibrary,
+  removeLibrary,
+  listLibraries,
+  findLibrary,
+  hasLibrarySnapshot,
+  isInGit,
   addConfigAgent,
   removeConfigAgent,
   filterStatus,
@@ -120,6 +129,10 @@ Commands:
   import --continue | --abort   Finish or drop an open merge
   remove, rm <skill...> [-a]    With -a: unassign those agents only. Without: remove from every agent
                                 and from the hub (asks first; the hub copy is moved to backups)
+  lib, library                  List your libraries: skills, whether they are there, and whether they are in git
+  lib open <name>               Print a library's folder and open it
+  lib unlink <name>             Stop using a library but keep its skills: agents keep working on real hub copies
+  lib rm <name>                 Remove a library's skills from the hub and every agent (asks first; files stay)
   completion <shell>            Print the script that turns on Tab for skill names: powershell, bash or zsh
   config                        Show the config file's location and every agent with its skills folder
   config add <id> <folder>      Add an agent to the config file
@@ -171,6 +184,8 @@ export const COMMAND_OPTIONS: Record<string, string[]> = {
   config: [],
   open: [],
   completion: [],
+  lib: ["dry-run", "yes"],
+  library: ["dry-run", "yes"],
 };
 const GLOBAL_OPTIONS = ["json", "help", "version", "global", "project"];
 
@@ -274,13 +289,14 @@ async function runComplete(argv: string[], io: Io): Promise<ExitCode> {
     const home = userHome(io.env);
     const profiles = () => loadProfiles(hub, home);
     const candidates = await complete((argv[0] ?? "=").slice(1), argv.slice(1), {
-      commands: [...Object.keys(COMMAND_OPTIONS), "completion", "help"].sort(),
+      commands: [...new Set([...Object.keys(COMMAND_OPTIONS), "help"])].sort(),
       options: COMMAND_OPTIONS,
       statuses: STATUS_ORDER,
       skills: async () => (await listSkills(hub)).map((s) => s.name),
       importable: async () => (await scanStatus(hub, { profiles: await profiles() })).unmanaged.map((u) => u.name),
       agents: async () => (await profiles()).map((p) => p.id),
       configAgents: async () => (await readConfig(hub.configPath)).agents.map((a) => a.id),
+      libraries: async () => (await listLibraries(hub)).map((l) => l.name),
     });
     if (candidates.length) io.stdout(candidates.join("\n"));
   } catch {
@@ -365,7 +381,7 @@ async function run(argv: string[], io: Io, json: boolean): Promise<ExitCode> {
     return 0;
   }
 
-  const writes = (["add", "assign", "sync", "remove", "rm", "import", "eject"].includes(command) && !values["dry-run"]) || (command === "config" && rest.length > 0);
+  const writes = (["add", "assign", "sync", "remove", "rm", "import", "eject"].includes(command) && !values["dry-run"]) || (command === "config" && rest.length > 0) || ((command === "lib" || command === "library") && ["unlink", "rm", "remove"].includes(rest[0] ?? "") && !values["dry-run"]);
   // Only commands that change something create the hub; status, list and --dry-run leave the disk alone.
   const home = resolveHubHome({ env: io.env });
   const hub = writes ? await openHub(home) : hubPaths(home);
@@ -416,7 +432,7 @@ async function run(argv: string[], io: Io, json: boolean): Promise<ExitCode> {
       const skills = (await listSkills(hub)).filter((s) => !ids || s.agents.some((a) => ids.includes(a)));
       if (json) io.stdout(JSON.stringify({ skills }));
       else if (ids && !skills.length) io.stdout(`No skills assigned to ${ids.join(", ")}.`);
-      else io.stdout(formatList(skills));
+      else io.stdout(formatList(skills, "", (await readManifest(hub.manifestPath)).libraries));
       return 0;
     }
     case "status":
@@ -460,8 +476,10 @@ async function run(argv: string[], io: Io, json: boolean): Promise<ExitCode> {
       }
       const result = await sync(hub, choice);
       const canAsk = Boolean(io.interactive && io.ask && !json && !values.yes);
+      if (!json && result.snapshotFailed.length) io.stderr(`warning: could not update the library snapshot of ${result.snapshotFailed.join(", ")}.`);
       if (json) io.stdout(JSON.stringify({ dryRun: false, ...result }));
-      else io.stdout(formatSync(result.results, canAsk ? [] : result.conflicts, false));
+      // About to ask about conflicts with nothing else to report: "Already in sync" would be untrue.
+      else if (result.results.length || !result.conflicts.length || !canAsk) io.stdout(formatSync(result.results, canAsk ? [] : result.conflicts, false));
       const failed = result.results.some((r) => !r.ok);
       if (!result.conflicts.length || !canAsk) return failed ? 2 : result.conflicts.length ? 1 : 0;
 
@@ -583,6 +601,60 @@ async function run(argv: string[], io: Io, json: boolean): Promise<ExitCode> {
       if (io.interactive && !json) openFolder(io, folder);
       return 0;
     }
+    case "lib":
+    case "library": {
+      const [action, name, ...extra] = rest;
+      if (!action) {
+        const libraries = await listLibraries(hub);
+        if (json) io.stdout(JSON.stringify({ libraries }));
+        else io.stdout(formatLibraries(libraries));
+        return 0;
+      }
+      if (!["open", "unlink", "rm", "remove"].includes(action)) {
+        throw new UsageError(`Unknown lib command "${action}". Use: skillsym lib, lib open <name>, lib unlink <name>, lib rm <name>`);
+      }
+      if (!name || extra.length) {
+        throw new UsageError(`lib ${action} takes one library: skillsym lib ${action} <name>${await libraryNames(hub)}`);
+      }
+      const library = await findLibrary(hub, name, io.cwd ?? process.cwd());
+      const dryRun = Boolean(values["dry-run"]);
+      if (action === "open") {
+        if (!library.found) throw new UsageError(`${library.path} is not there. If it moved, run: skillsym add <new path> --link`);
+        if (json) io.stdout(JSON.stringify({ library: library.name, path: library.path }));
+        else io.stdout(library.path);
+        if (io.interactive && !json) openFolder(io, library.path);
+        return 0;
+      }
+      if (action === "unlink") {
+        const result = await unlinkLibrary(hub, library, { dryRun });
+        if (json) io.stdout(JSON.stringify({ dryRun, ...result }));
+        else io.stdout(formatUnlink(library, result, dryRun));
+        return result.forgotten ? 0 : 1;
+      }
+      if (!dryRun && !values.yes) {
+        const what = `the ${library.skills.length} skill(s) of ${library.name} from the hub and every agent`;
+        if (!(io.interactive && io.ask && !json)) {
+          throw new UsageError(`lib rm removes ${what}; confirm with -y, preview it with --dry-run, or keep the skills with \`skillsym lib unlink\`.`);
+        }
+        const answer = (await io.ask(`Remove ${what}? Your library's files stay. To keep the skills, use lib unlink instead. [y/N] (Enter = no) `)).trim().toLowerCase();
+        if (answer !== "y" && answer !== "yes") {
+          io.stdout("Cancelled; nothing changed.");
+          return 1;
+        }
+      }
+      const removed = await removeLibrary(hub, library, { dryRun, profiles });
+      if (json) io.stdout(JSON.stringify({ dryRun, library: library.path, ...removed }));
+      else {
+        io.stdout(
+          [
+            `${dryRun ? "Would remove" : "Removed"} ${removed.removedSkills.length} skill(s) of ${library.name} from the hub and every agent.`,
+            ...removed.removedSkills.map((r) => `  ${r.skill}`),
+            `Your library's files ${dryRun ? "stay" : "are untouched"}: ${library.path}${dryRun ? "" : "; skillsym no longer uses it."}`,
+          ].join("\n"),
+        );
+      }
+      return 0;
+    }
     case "config": {
       if (rest[0] === "add") {
         const [, id, folder, ...extra] = rest;
@@ -653,6 +725,11 @@ async function addFromLibrary(
         : `warning: the library ${library} is inside a ${provider} folder; that is fine for copying, but keep the hub itself out of synced folders.`,
     );
   }
+  if (link && !json && !(await isInGit(library))) {
+    io.stderr(
+      `warning: ${library} is not in git. With --link it holds the only real copy of its skills, and skillsym keeps just one snapshot of each (restored by \`skillsym sync\` if the library is lost). For history, run \`git init\` there.`,
+    );
+  }
   if (dryRun) {
     const plan = await planLibraryAdd(hub, library, { link });
     if (json) io.stdout(JSON.stringify({ dryRun: true, ...plan }));
@@ -660,18 +737,22 @@ async function addFromLibrary(
     return plan.items.some((i) => i.type === "skip") ? 1 : 0;
   }
   const result = await addLibrary(hub, library, { link });
-  const names = result.added.map((s) => s.name);
+  // -a applies to every skill now linked from the library, including ones already linked earlier.
+  const names = result.items.filter((i) => i.type !== "skip").map((i) => i.name);
   const assigned = agents.length && names.length ? (await assignSkills(hub, { skills: names, agents, profiles })).results : [];
   if (json) io.stdout(JSON.stringify({ dryRun: false, ...result, assigned }));
   else {
+    if (result.snapshotFailed.length) io.stderr(`warning: could not update the library snapshot of ${result.snapshotFailed.join(", ")}.`);
     io.stdout(formatLibrary(result.items, library, false, link));
     if (assigned.length) io.stdout(formatLinks(assigned));
-    if (link) {
+    if (link && !names.length) {
+      io.stdout(`\nNothing is linked from ${library}, so skillsym is not using it; edit these skills in ${hub.skillsDir} as before.`);
+    } else if (link) {
+      const unassigned = !agents.length && result.added.some((s) => !s.agents.length);
       io.stdout(
-        `\nYour library stays the source of truth: edit (and commit) skills in ${library}; every agent sees the change.` +
-          "\nskillsym remembers this library: `skillsym status` lists skills you add to it later; add them by running this command again." +
-          "\n`skillsym remove` and `skillsym eject` never delete anything in the library." +
-          (agents.length || !names.length ? "" : "\nAssign them to agents with: skillsym assign <skill...> -a <agents>"),
+        `\nYour library stays the source of truth: edit skills in ${library}, and every agent sees the change.` +
+          "\n`skillsym status` lists skills you add there later; run this command again to add them. skillsym never deletes anything in the library." +
+          (unassigned ? "\nAssign them to agents with: skillsym assign <skill...> -a <agents>" : ""),
       );
     } else if (names.length) {
       io.stdout(
@@ -688,19 +769,32 @@ async function addFromLibrary(
 function formatLibrary(items: LibraryItem[], library: string, dryRun: boolean, link = false): string {
   const add = items.filter((i) => i.type === "add");
   const repoint = items.filter((i) => i.type === "repoint");
+  const adopt = items.filter((i) => i.type === "adopt");
   const unchanged = items.filter((i) => i.type === "unchanged");
   const skip = items.filter((i) => i.type === "skip");
   const how = link ? "linked to the library" : "copied into the hub";
-  const lines = [`${dryRun ? "Would add" : "Added"} ${add.length} skill(s) from ${library} (${how}):`];
-  for (const i of add) lines.push(`  ${i.name.padEnd(24)} ${path.relative(library, i.path) || "."}`);
+  const lines: string[] = [];
+  const width = Math.max(...items.map((i) => i.name.length));
+  // Keep the first line even at 0 when nothing else happened, so the result is never blank.
+  if (add.length || (!repoint.length && !adopt.length && !unchanged.length)) {
+    lines.push(`${dryRun ? "Would add" : "Added"} ${add.length} skill(s) from ${library} (${how}):`);
+    for (const i of add) lines.push(`  ${i.name.padEnd(width)}  ${path.relative(library, i.path) || "."}`);
+  }
   if (repoint.length) {
     lines.push(`${dryRun ? "Would re-point" : "Re-pointed"} ${repoint.length} skill(s) whose library folder moved:`);
-    for (const i of repoint) lines.push(`  ${i.name.padEnd(24)} ${path.relative(library, i.path) || "."}  (${i.reason})`);
+    for (const i of repoint) lines.push(`  ${i.name.padEnd(width)}  ${path.relative(library, i.path) || "."}`);
+  }
+  if (adopt.length) {
+    lines.push(`${dryRun ? "Would switch" : "Switched"} ${adopt.length} skill(s) to ${library}; they had the same content, and agents keep working:`);
+    for (const i of adopt) lines.push(`  ${i.name}`);
+    // One operation shares one backup folder: say it once.
+    const backup = adopt[0]?.backup;
+    if (backup) lines.push(`Hub copies backed up in ${path.dirname(backup)}`);
   }
   if (unchanged.length) lines.push(`Already linked from this library: ${unchanged.map((i) => i.name).join(", ")}`);
   if (skip.length) {
     lines.push(`Skipped ${skip.length}:`);
-    for (const i of skip) lines.push(`  ${i.name.padEnd(24)} ${i.reason}`);
+    for (const i of skip) lines.push(`  ${i.name.padEnd(width)}  ${i.reason}`);
   }
   if (dryRun) lines.push("", "Nothing was changed. Run the same command without --dry-run to add them.");
   return lines.join("\n");
@@ -956,15 +1050,22 @@ function parseCommandLine(argv: string[]) {
   }
 }
 
-function formatList(skills: SkillInfo[], indent = ""): string {
+function formatList(skills: SkillInfo[], indent = "", libraries: string[] = []): string {
   if (!skills.length) return "No skills in the hub yet. Add one with: skillsym add <path>";
+  const agentsOf = (s: SkillInfo) => (s.agents.length ? s.agents.join(", ") : "(not assigned)");
   const width = Math.max(...skills.map((s) => s.name.length));
-  return skills
-    .map((s) => {
-      const line = `${s.name.padEnd(width)}  ${s.agents.length ? s.agents.join(", ") : "(not assigned)"}`;
-      return indent + (s.mode === "source-link" && s.source ? `${line}  [linked from ${s.source}]` : line);
-    })
-    .join("\n");
+  const agentWidth = Math.max(...skills.map((s) => agentsOf(s).length));
+  // One path per library, said once; each linked skill points at it.
+  const sources: string[] = [];
+  const mark = (s: SkillInfo) => {
+    if (s.mode !== "source-link" || !s.source) return "";
+    const from = libraries.find((l) => !path.relative(l, s.source!).startsWith("..")) ?? path.dirname(s.source);
+    if (!sources.includes(from)) sources.push(from);
+    return `[${sources.indexOf(from) + 1}]`;
+  };
+  const lines = skills.map((s) => `${indent}${s.name.padEnd(width)}  ${agentsOf(s).padEnd(agentWidth)}  ${mark(s)}`.trimEnd());
+  if (sources.length) lines.push("", ...sources.map((from, i) => `${indent}[${i + 1}] linked from ${from}`));
+  return lines.join("\n");
 }
 
 const OUTCOME_MARK: Record<AgentLinkResult["outcome"], string> = {
@@ -983,6 +1084,36 @@ function formatLinks(results: AgentLinkResult[]): string {
       return r.reason ? `${line}\n                ${r.reason}` : line;
     })
     .join("\n");
+}
+
+async function libraryNames(hub: Hub): Promise<string> {
+  const names = (await listLibraries(hub)).map((l) => l.name);
+  return names.length ? `\nLibraries: ${names.join(", ")}` : "\nNo libraries yet. Link one with: skillsym add <folder> --link";
+}
+
+function formatLibraries(libraries: LibraryInfo[]): string {
+  if (!libraries.length) return "No libraries yet. Link one with: skillsym add <folder> --link";
+  const width = Math.max(...libraries.map((l) => l.name.length));
+  return libraries
+    .map((l) => `${l.name.padEnd(width)}  ${l.skills.length} skill(s)  ${l.found ? (l.git ? "in git" : "not in git") : "NOT FOUND"}\n${" ".repeat(width)}  ${l.path}`)
+    .join("\n");
+}
+
+function formatUnlink(library: LibraryInfo, result: UnlinkResult, dryRun: boolean): string {
+  if (!result.skills.length) return dryRun ? `${library.name} has no skills linked; it would be forgotten.` : `Forgot ${library.name}; no skills were linked from it.`;
+  const kept = result.skills.filter((s) => s.outcome !== "lost");
+  const lost = result.skills.filter((s) => s.outcome === "lost");
+  const lines = [`${dryRun ? "Would keep" : "Kept"} ${kept.length} skill(s) from ${library.name} as real copies in the hub; agents keep working:`];
+  for (const s of kept) lines.push(`  ${s.skill}${s.outcome === "from-snapshot" ? "  (from its latest snapshot; the library is gone)" : ""}`);
+  if (lost.length) {
+    lines.push(`Could not keep ${lost.length}, with no library and no snapshot; left as they are:`);
+    for (const s of lost) lines.push(`  ${s.skill}`);
+    lines.push("Restore the library, or remove them with: skillsym remove <skill>");
+  } else if (!dryRun) {
+    lines.push(`skillsym no longer uses ${library.path}, and did not change it. Edit these skills in the hub from now on.`);
+  }
+  if (dryRun) lines.push("", "Nothing was changed. Run the same command without --dry-run to do this.");
+  return lines.join("\n");
 }
 
 function formatConfig(file: string, exists: boolean, rows: { id: string; skillsDir: string; source: string; installed: boolean }[]): string {
@@ -1005,7 +1136,7 @@ const STATUS_HINT: Record<StatusReport["entries"][number]["status"], string> = {
   blocked: "occupied by something skillsym did not create; use `skillsym import`",
   orphaned: "no longer assigned in the manifest; `skillsym sync` will remove the link",
   covered: "",
-  "source-missing": "the library folder it is linked from is gone; if you moved the library, run `skillsym add <new library path> --link`",
+  "source-missing": "the library folder it is linked from is gone, so agents cannot read it; if you moved the library, run `skillsym add <new library path> --link`",
   duplicate: "the agent also loads this skill from another folder, so it is loaded twice; `skillsym sync` will remove this link",
 };
 
@@ -1056,7 +1187,7 @@ function formatStatus(report: StatusReport, showAll: boolean, filtered: boolean)
     lines.push(`  bring them in with \`skillsym import\`${listNames ? "" : "; `skillsym status --only unmanaged` lists them"}`);
   }
   if (lines.length) lines.push("");
-  const libraries = filtered ? { missing: [], newSkills: [], missingLibraries: [] } : report.libraries;
+  const libraries = filtered ? { missing: [], newSkills: [], missingLibraries: [], folders: [] } : report.libraries;
   for (const m of libraries.missing.filter((m) => !report.entries.some((e) => e.skill === m.skill))) {
     lines.push(`SOURCE-MISSING  ${m.skill} (not assigned)  library folder ${m.source || "(unknown)"} is gone; run \`skillsym add <new library path> --link\` if it moved`);
   }
@@ -1066,7 +1197,11 @@ function formatStatus(report: StatusReport, showAll: boolean, filtered: boolean)
     lines.push(`new in library ${library}: ${names.join(", ")} — add them with \`skillsym add "${library}" --link\``);
   }
   for (const l of libraries.missingLibraries) {
-    lines.push(`library not found: ${l} — if it moved, run \`skillsym add <new path> --link\``);
+    lines.push(`library not found: ${l} — if it moved, run \`skillsym add <new path> --link\`; if it was deleted, \`skillsym sync\` can restore its skills from their latest snapshots or drop them`);
+  }
+  if (showAll && libraries.folders.length) {
+    lines.push("", `libraries (${libraries.folders.length})`);
+    for (const f of libraries.folders) lines.push(`  ${f.path}  ${f.found ? "found" : "NOT FOUND"}, ${f.skills} skill(s) linked${f.found && !f.git ? ", not in git" : ""}`);
   }
   for (const w of report.warnings) lines.push(`warning: ${w.message}`);
 
@@ -1140,9 +1275,15 @@ async function askAndResolve(hub: Hub, conflicts: SyncConflict[], io: Io, profil
       decisions.push({ path: c.path, choice: "skip" });
       continue;
     }
-    const choices = choicesFor(c.type);
+    // A missing library skill can only come back from a snapshot, if there is one.
+    const fromSnapshot = c.type === "source-missing";
+    const canRestore = !fromSnapshot || (await hasLibrarySnapshot(hub, c.skill));
+    const choices = choicesFor(c.type).filter((choice) => choice !== "restore" || canRestore);
     io.stdout(`\n${c.skill} -> ${c.agents.join(", ")} ${CONFLICT_TITLE[c.type]}\n  ${c.path}`);
-    for (const choice of choices) io.stdout(`  [${choice[0]}] ${choice.padEnd(7)} ${CHOICE_HELP[choice]}`);
+    for (const choice of choices) {
+      const help = fromSnapshot && choice === "restore" ? "put the skill back in your library from skillsym's latest snapshot" : CHOICE_HELP[choice];
+      io.stdout(`  [${choice[0]}] ${choice.padEnd(7)} ${help}`);
+    }
     const answer = await askOne(io, choices);
     if (answer === "quit") {
       quit = true;
@@ -1172,7 +1313,7 @@ function formatResolutions(results: ConflictResolution[]): string {
     if (!r.ok) return `FAILED  ${r.choice} ${skill}: ${r.error}`;
     if (r.choice === "skip") return `skipped ${skill}`;
     let line = `${r.choice.padEnd(7)} ${skill}${r.newSkill ? ` -> new skill "${r.newSkill}"` : ""}`;
-    if (r.library) line += `\n        wrote the new version into your library: ${r.library} (review it with git diff)`;
+    if (r.library) line += r.choice === "restore" ? `\n        put back from the latest snapshot: ${r.library}` : `\n        wrote the new version into your library: ${r.library} (review it with git diff)`;
     for (const b of r.backups) line += `\n        backup: ${b}`;
     return line;
   });

@@ -197,6 +197,7 @@ from, so skillsym does not give it a second copy of a skill it already sees.
 | `skillsym import --continue` / `--abort` | Finish or drop an open merge. |
 | `skillsym remove <skill...> -a <agents>` | Unassign a skill from some agents. |
 | `skillsym remove <skill...>` / `rm` | Remove a skill from every agent and from the hub (the hub copy is moved to backups; a linked library is never touched). |
+| `skillsym lib` / `library` | List your libraries. Also `lib open <name>`, `lib unlink <name>` and `lib rm <name>`; see [Your own library](#your-own-library). |
 | `skillsym completion <shell>` | Print the script that turns on Tab: `powershell`, `bash` or `zsh`. |
 | `skillsym config` | Show the config file's location and every agent with its skills folder. |
 | `skillsym config add <id> <folder>` / `config remove <id>` | Add an agent, or take one out (not while skills are assigned to it). |
@@ -288,6 +289,30 @@ If the same skill exists in several agents with different content, you choose:
 | The library afterwards | not used by skillsym; keep or delete it | still in use; skillsym never deletes anything in it |
 | New skills in the library | add them again yourself | `status` lists them; run the same `add --link` again |
 | A skill you took out of the hub | | `status` no longer offers it; running `add --link` again brings it back |
+| A skill the hub already holds | skipped | same content: the hub switches to your library, and agents keep working; different content: skipped and reported |
+
+A library's name is its folder's name:
+
+```bash
+skillsym lib                      # list them: skills, whether they are there, whether they are in git
+skillsym lib open my-skills       # open the folder
+skillsym lib unlink my-skills     # stop using it but keep its skills: agents keep working on real hub copies
+skillsym lib rm my-skills         # remove its skills from the hub and every agent; asks first
+```
+
+Neither `unlink` nor `rm` changes your library's files. `add --link` warns when a library is not in git.
+
+**Snapshots.** The hub keeps the latest copy of each `--link` skill in `library-snapshots`, updated by `add --link` and
+`sync`. It holds one version per skill, as of the last time one of those ran, so it is a safety net and does not
+replace git. Everything stays on your machine, so keep your library in git and push it somewhere if you do not want to
+lose it with this computer.
+
+**If the library moves or disappears,** agents cannot read its skills until you act, and `status` shows them as
+`source-missing`:
+
+- Moved: run `skillsym add <new path> --link`. Every skill follows, and agents keep their assignments.
+- Deleted: run `skillsym sync` in a terminal and choose `restore` to put each skill back from its snapshot, or `drop` to
+  unassign it. Edits made since the last `sync` are not in the snapshot.
 
 With `--link`, if you resolve a conflict by adopting an agent's version, or pick an agent's copy during import,
 skillsym writes it **into your library** after backing up the library's version, so you can review it with `git diff`.

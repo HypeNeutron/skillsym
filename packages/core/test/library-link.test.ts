@@ -89,10 +89,54 @@ describe("add --link", () => {
     expect(await fs.readFile(hub.manifestPath, "utf8")).toBe(manifestBefore);
   });
 
-  it("skips a name that is already in the hub as a copy", async () => {
+  it("leaves a hub copy that differs alone, and reports it", async () => {
     await addSkill(hub, await makeSkill(path.join(root, "other"), "coding"));
+    const before = await hashSkillDir(path.join(hub.skillsDir, "coding"));
     const { items } = await addLibrary(hub, lib, { link: true });
-    expect(items.find((i) => i.name === "coding")).toMatchObject({ type: "skip" });
+    const item = items.find((i) => i.name === "coding")!;
+    expect(item.type).toBe("skip");
+    expect(item.reason).toContain("differs");
+    expect(item.reason).not.toContain("remove");
+    expect(await readLinkTarget(path.join(hub.skillsDir, "coding"))).toBeNull();
+    expect(await hashSkillDir(path.join(hub.skillsDir, "coding"))).toBe(before);
+  });
+
+  it("switches a hub copy with the same content to the library, and agents keep working", async () => {
+    await addSkill(hub, libSkill("coding"));
+    await assignSkills(hub, { skills: ["coding"], agents: ["claude", "codex"], profiles });
+
+    const plan = await planLibraryAdd(hub, lib, { link: true });
+    expect(plan.items.find((i) => i.name === "coding")?.type).toBe("adopt");
+    expect(await readLinkTarget(path.join(hub.skillsDir, "coding"))).toBeNull();
+
+    const { items } = await addLibrary(hub, lib, { link: true });
+    const item = items.find((i) => i.name === "coding")!;
+    expect(item.type).toBe("adopt");
+    expect(await hashSkillDir(item.backup!)).toBe(await hashSkillDir(libSkill("coding")));
+
+    const entry = (await readManifest(hub.manifestPath)).skills.coding!;
+    expect(entry).toMatchObject({ mode: "source-link", source: libSkill("coding") });
+    expect(entry.agents).toEqual(["claude", "codex"]);
+    expect((await status()).clean).toBe(true);
+
+    // An edit in the library reaches the agent through both links.
+    await fs.writeFile(path.join(libSkill("coding"), "a.md"), "library v2\n");
+    expect(await fs.readFile(path.join(claude("coding"), "a.md"), "utf8")).toBe("library v2\n");
+
+    // The library is never written to, and running it again changes nothing.
+    const manifestBefore = await fs.readFile(hub.manifestPath, "utf8");
+    const again = await addLibrary(hub, lib, { link: true });
+    expect(again.items.find((i) => i.name === "coding")?.type).toBe("unchanged");
+    expect(await fs.readFile(hub.manifestPath, "utf8")).toBe(manifestBefore);
+  });
+
+  it("does not remember a library when nothing came through", async () => {
+    const other = path.join(root, "only-different");
+    await makeSkill(other, "coding", { "a.md": "different\n" });
+    await addSkill(hub, await makeSkill(path.join(root, "other"), "coding"));
+    const { items } = await addLibrary(hub, other, { link: true });
+    expect(items.map((i) => i.type)).toEqual(["skip"]);
+    expect((await readManifest(hub.manifestPath)).libraries).toBeUndefined();
   });
 
   it("--dry-run changes nothing", async () => {
@@ -208,6 +252,50 @@ describe("library moved, and new skills in the library", () => {
     expect(r!.ok).toBe(true);
     await expect(fs.lstat(claude())).rejects.toThrow();
     expect((await readManifest(hub.manifestPath)).skills.coding!.agents).toEqual([]);
+  });
+});
+
+describe("library snapshots", () => {
+  const snapshot = (skill = "coding") => path.join(hub.home, "library-snapshots", skill);
+  const conflicts = async () => (await sync(hub, { profiles })).conflicts;
+
+  it("are taken by add --link, follow edits on sync, and restore a deleted library", async () => {
+    await linkLibrary();
+    expect(await fs.readFile(path.join(snapshot(), "a.md"), "utf8")).toBe("library v1\n");
+
+    await fs.writeFile(path.join(libSkill(), "a.md"), "library v2\n");
+    expect((await sync(hub, { profiles })).snapshotFailed).toEqual([]);
+    expect(await fs.readFile(path.join(snapshot(), "a.md"), "utf8")).toBe("library v2\n");
+
+    await removeDir(lib);
+    const found = await conflicts();
+    expect(found.find((c) => c.skill === "coding")?.type).toBe("source-missing");
+
+    const resolved = await resolveConflicts(hub, found.map((c) => ({ path: c.path, choice: "restore" as const })), { profiles });
+    expect(resolved.every((r) => r.ok)).toBe(true);
+    expect(await fs.readFile(path.join(libSkill(), "a.md"), "utf8")).toBe("library v2\n");
+    expect(await fs.readFile(path.join(claude(), "a.md"), "utf8")).toBe("library v2\n");
+    expect((await status()).clean).toBe(true);
+  });
+
+  it("never overwrite a folder, and fail plainly with no snapshot", async () => {
+    await linkLibrary();
+    await removeDir(snapshot());
+    await removeDir(lib);
+    const found = await conflicts();
+    const [result] = await resolveConflicts(hub, [{ path: found.find((c) => c.skill === "coding")!.path, choice: "restore" }], { profiles });
+    expect(result!.ok).toBe(false);
+    expect(result!.error).toContain("no snapshot");
+  });
+
+  it("do not change a dry run or the library, and leave with the skill", async () => {
+    await planLibraryAdd(hub, lib, { link: true });
+    await expect(fs.access(snapshot())).rejects.toThrow();
+
+    await linkLibrary();
+    await removeSkills(hub, { skills: ["coding"], profiles });
+    await expect(fs.access(snapshot())).rejects.toThrow();
+    await fs.access(path.join(libSkill(), "a.md"));
   });
 });
 

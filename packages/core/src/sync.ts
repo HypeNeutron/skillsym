@@ -8,6 +8,7 @@ import type { Hub } from "./hub.js";
 import { createDirLink, readLinkTarget, removeDirLink } from "./links.js";
 import { withLock, type LockOptions } from "./lock.js";
 import { readState, samePath, writeState, type State } from "./state.js";
+import { refreshLibrarySnapshots } from "./snapshots.js";
 import { filterStatus, scanStatus, type StatusEntry } from "./status.js";
 
 export type SyncActionType =
@@ -68,6 +69,8 @@ export interface SyncActionResult extends SyncAction {
 
 export interface SyncResult extends SyncPlan {
   results: SyncActionResult[];
+  /** Skills whose library snapshot could not be updated. */
+  snapshotFailed: string[];
 }
 
 export interface SyncOptions {
@@ -105,7 +108,7 @@ export async function sync(hub: Hub, options: SyncOptions = {}): Promise<SyncRes
       for (const action of plan.actions) results.push(await apply(hub, state, action));
       // Nothing to do means nothing is written, not even an identical state file.
       if (plan.actions.length) await writeState(hub.statePath, state);
-      return { ...plan, results };
+      return { ...plan, results, snapshotFailed: await refreshLibrarySnapshots(hub) };
     },
     options.lock,
   );

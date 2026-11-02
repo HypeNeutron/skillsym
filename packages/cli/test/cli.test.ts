@@ -804,6 +804,200 @@ describe("skillsym CLI", () => {
     expect(text.stdout).toContain("already in the hub");
   });
 
+  describe("lib", () => {
+    const setup = async () => {
+      const lib = path.join(root, "my-skills");
+      await makeSkill(lib, "one", { "a.md": "mine" });
+      await makeSkill(lib, "two");
+      run(["add", lib, "--link", "-a", "claude"]);
+      run(["add", await makeSkill(path.join(root, "src"), "own"), "-a", "claude"]);
+      return lib;
+    };
+    const skills = () => JSON.parse(run(["list", "--json"]).stdout).skills as { name: string; mode: string; agents: string[] }[];
+    const agentFile = (s: string) => path.join(root, "user", ".claude", "skills", s, "SKILL.md");
+
+    it("lists libraries by folder name, and list says each path once", async () => {
+      expect(run(["lib"]).stdout).toContain("No libraries yet");
+      const lib = await setup();
+      const text = run(["lib"]).stdout;
+      expect(text).toContain("my-skills  2 skill(s)  not in git");
+      expect(text).toContain(lib);
+      expect(JSON.parse(run(["library", "--json"]).stdout).libraries[0]).toMatchObject({ name: "my-skills", path: lib, found: true, skills: ["one", "two"], git: false });
+      const list = run(["ls"]).stdout;
+      expect(list.split(lib).length).toBe(2);
+      expect(list).toMatch(/one +claude +\[1\]/);
+      expect(list).toMatch(/own +claude$/m);
+    });
+
+    it("open prints the folder; a wrong name lists the right ones", async () => {
+      const lib = await setup();
+      expect(run(["lib", "open", "MY-SKILLS"]).stdout.trim()).toBe(lib);
+      expect(run(["lib", "open", lib]).stdout.trim()).toBe(lib);
+      const wrong = run(["lib", "open", "nope"]);
+      expect(wrong.code).toBe(2);
+      expect(wrong.stderr).toContain("Libraries: my-skills");
+      const none = run(["lib", "unlink"]);
+      expect(none.code).toBe(2);
+      expect(none.stderr).toContain("Libraries: my-skills");
+      expect(run(["lib", "nope", "x"]).code).toBe(2);
+    });
+
+    it("unlink keeps the skills as hub copies, agents keep working, and the library is untouched", async () => {
+      const lib = await setup();
+      const preview = run(["lib", "unlink", "my-skills", "-dr"]);
+      expect(preview.stdout).toContain("Would keep 2 skill(s)");
+      expect(skills().find((s) => s.name === "one")!.mode).toBe("source-link");
+
+      const done = run(["lib", "unlink", "my-skills"]);
+      expect(done.code).toBe(0);
+      expect(skills().map((s) => s.mode)).toEqual(["link", "link", "link"]);
+      expect(skills().find((s) => s.name === "one")!.agents).toEqual(["claude"]);
+      expect((await fs.lstat(path.join(home, "skills", "one"))).isSymbolicLink()).toBe(false);
+      await fs.access(agentFile("one"));
+      expect(run(["check"]).code).toBe(0);
+      expect(run(["lib"]).stdout).toContain("No libraries yet");
+      await expect(fs.access(path.join(home, "library-snapshots", "one"))).rejects.toThrow();
+
+      // No longer tied: the library can go, and an edit there no longer reaches agents.
+      await fs.access(path.join(lib, "one", "a.md"));
+      await removeDir(lib);
+      await fs.access(agentFile("one"));
+      expect(run(["check"]).code).toBe(0);
+    });
+
+    it("unlink saves skills from the snapshot when the library is gone, and keeps what it cannot save", async () => {
+      const lib = await setup();
+      await removeDir(path.join(home, "library-snapshots", "two"));
+      await removeDir(lib);
+      const r = run(["lib", "unlink", "my-skills"]);
+      expect(r.code).toBe(1);
+      expect(r.stdout).toContain("from its latest snapshot");
+      expect(r.stdout).toContain("Could not keep 1");
+      const modes = Object.fromEntries(skills().map((s) => [s.name, s.mode]));
+      expect(modes).toMatchObject({ one: "link", two: "source-link" });
+      await fs.access(agentFile("one"));
+      expect(run(["lib"]).stdout).toContain("NOT FOUND");
+    });
+
+    it("rm asks for confirmation, removes only that library's skills, and leaves its files", async () => {
+      const lib = await setup();
+      const refused = run(["lib", "rm", "my-skills"]);
+      expect(refused.code).toBe(2);
+      expect(refused.stderr).toContain("lib unlink");
+      expect(skills()).toHaveLength(3);
+
+      const preview = run(["lib", "rm", "my-skills", "--dry-run"]);
+      expect(preview.stdout).toContain("Would remove 2 skill(s)");
+      expect(skills()).toHaveLength(3);
+
+      expect(run(["lib", "rm", "my-skills", "-y"]).code).toBe(0);
+      expect(skills().map((s) => s.name)).toEqual(["own"]);
+      await expect(fs.access(agentFile("one"))).rejects.toThrow();
+      await fs.access(agentFile("own"));
+      await fs.access(path.join(lib, "one", "a.md"));
+      expect(run(["lib"]).stdout).toContain("No libraries yet");
+      expect(run(["check"]).code).toBe(0);
+    });
+
+    it("listing and previewing create no hub", async () => {
+      run(["lib"]);
+      await expect(fs.access(home)).rejects.toThrow();
+    });
+  });
+
+  it("status --all shows libraries; a moved library is followed, and its old place forgotten", async () => {
+    const lib = path.join(root, "my-skills");
+    await makeSkill(lib, "one");
+    await makeSkill(lib, "two");
+    run(["add", lib, "--link", "-a", "claude"]);
+    const agentFile = path.join(root, "user", ".claude", "skills", "one", "SKILL.md");
+
+    const healthy = run(["status", "--all"]).stdout;
+    expect(healthy).toContain("libraries (1)");
+    expect(healthy).toContain(`${lib}  found, 2 skill(s) linked`);
+    expect(run(["status"]).stdout).not.toContain("libraries (");
+    expect(JSON.parse(run(["status", "--json"]).stdout).libraries.folders).toEqual([{ path: lib, found: true, skills: 2, git: false }]);
+
+    const moved = path.join(root, "moved-skills");
+    await fs.rename(lib, moved);
+    await expect(fs.access(agentFile)).rejects.toThrow();
+    expect(run(["check"]).code).toBe(1);
+    const gone = run(["status", "--all"]).stdout;
+    expect(gone).toContain("SOURCE-MISSING (2)");
+    expect(gone).toContain(`${lib}  NOT FOUND, 2 skill(s) linked`);
+
+    expect(run(["add", moved, "--link"]).code).toBe(0);
+    await fs.access(agentFile);
+    expect(run(["check"]).code).toBe(0);
+    const after = run(["status", "--all"]).stdout;
+    expect(after).toContain(`${moved}  found, 2 skill(s) linked`);
+    expect(after).not.toContain(lib + " ");
+    expect(run(["status"]).stdout).not.toContain("library not found");
+  });
+
+  it("warns when a library is not in git, and says so in status --all", async () => {
+    const lib = path.join(root, "my-skills");
+    await makeSkill(lib, "one");
+    const r = run(["add", lib, "--link"]);
+    expect(r.stderr).toContain("is not in git");
+    expect(run(["status", "--all"]).stdout).toContain("not in git");
+    expect(run(["add", lib, "--link", "--json"]).stderr).not.toContain("not in git");
+
+    await fs.mkdir(path.join(lib, ".git"));
+    expect(run(["add", lib, "--link"]).stderr).not.toContain("not in git");
+    expect(run(["status", "--all"]).stdout).not.toContain("not in git");
+    expect(JSON.parse(run(["status", "--json"]).stdout).libraries.folders[0].git).toBe(true);
+  });
+
+  it("a deleted library is reported until its skills are dealt with", async () => {
+    const lib = path.join(root, "my-skills");
+    await makeSkill(lib, "one");
+    run(["add", lib, "--link", "-a", "claude"]);
+    await removeDir(lib);
+    const r = run(["status"]).stdout;
+    expect(r).toContain("SOURCE-MISSING (1)");
+    expect(r).toContain("library not found");
+    expect(r).toContain("if it was deleted");
+    expect(run(["sync", "-y"]).code).toBe(1);
+    expect(JSON.parse(run(["list", "--json"]).stdout).skills[0].name).toBe("one");
+  });
+
+  it("add --link says what really happened to skills already in the hub, and applies -a", async () => {
+    const lib = path.join(root, "my-skills");
+    const same = await makeSkill(lib, "same", { "a.md": "x" });
+    run(["add", same, "-a", "claude"]);
+    const differs = path.join(root, "only-different");
+    await makeSkill(differs, "same", { "a.md": "y" });
+
+    const none = run(["add", differs, "--link", "-a", "codex"]);
+    expect(none.code).toBe(1);
+    expect(none.stdout).toContain("differs from the hub's copy");
+    expect(none.stdout).toContain("skillsym is not using it");
+    expect(none.stdout).not.toContain("source of truth");
+    expect(none.stdout).not.toContain("run this command again");
+    const skills = () => JSON.parse(run(["list", "--json"]).stdout).skills as { name: string; agents: string[]; mode: string }[];
+    expect(skills()[0]).toMatchObject({ mode: "link", agents: ["claude"] });
+
+    const preview = run(["add", lib, "--link", "--dry-run"]);
+    expect(preview.stdout).toContain("Would switch 1 skill(s)");
+    expect(skills()[0]!.mode).toBe("link");
+
+    const done = run(["add", lib, "--link", "-a", "codex"]);
+    expect(done.code).toBe(0);
+    expect(done.stdout).toContain("Switched 1 skill(s)");
+    expect(done.stdout).not.toContain("Added 0");
+    expect(done.stdout).not.toContain("Assign them to agents");
+    expect(done.stdout.split("Hub copies backed up").length).toBe(2);
+    expect(done.stdout).toContain("source of truth");
+    expect(skills()[0]!.mode).toBe("source-link");
+    expect(skills()[0]!.agents).toEqual(["claude", "codex"]);
+    expect(run(["check"]).code).toBe(0);
+
+    // -a also reaches a skill linked earlier.
+    expect(run(["add", lib, "--link", "-a", "universal"]).code).toBe(0);
+    expect(skills()[0]!.agents).toContain("universal");
+  });
+
   it("add --link links the library, list shows it, and status points out new skills in it", async () => {
     const lib = path.join(root, "my-skills");
     await makeSkill(lib, "coding");
@@ -811,7 +1005,9 @@ describe("skillsym CLI", () => {
     expect(r.code).toBe(0);
     expect(r.stdout).toContain("linked to the library");
     expect(r.stdout).toContain("Your library stays the source of truth");
-    expect(run(["ls"]).stdout).toContain(`[linked from ${path.join(lib, "coding")}]`);
+    const listed = run(["ls"]).stdout;
+    expect(listed).toContain(`[1] linked from ${lib}`);
+    expect(listed.split(lib).length).toBe(2);
 
     await makeSkill(lib, "fresh");
     const status = run(["status"]);

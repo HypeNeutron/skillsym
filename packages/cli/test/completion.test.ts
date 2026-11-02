@@ -84,6 +84,17 @@ describe("what Tab offers", () => {
     expect(tab("status", "--only", "missing,r")).toEqual(["missing,replaced"]);
   });
 
+  it("offers lib's actions and library names", async () => {
+    expect(tab("li")).toEqual(expect.arrayContaining(["lib", "library", "list"]));
+    expect(tab("lib", "")).toEqual(["open", "unlink", "rm"]);
+    const lib = path.join(root, "my-skills");
+    await makeSkill(lib, "one");
+    run("add", lib, "--link");
+    expect(tab("lib", "open", "my")).toEqual(["my-skills"]);
+    expect(tab("library", "rm", "")).toEqual(["my-skills"]);
+    expect(tab("lib", "open", "my-skills", "")).toEqual([]);
+  });
+
   it("leaves add's path and init's name to the shell", async () => {
     await withSkills();
     expect(tab("add", "web")).toEqual([]);

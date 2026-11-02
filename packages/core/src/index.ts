@@ -13,6 +13,9 @@ export {
 } from "./manifest.js";
 export { STATE_VERSION, readState, writeState, type State, type StateLink, type LinkKind } from "./state.js";
 export { withLock, type LockOptions } from "./lock.js";
+export { hasLibrarySnapshot, refreshLibrarySnapshots } from "./snapshots.js";
+export { findLibrary, listLibraries, removeLibrary, unlinkLibrary, type LibraryInfo, type UnlinkResult, type UnlinkedSkill } from "./libraries.js";
+export { isInGit } from "./library.js";
 export { addSkill, listSkills, isValidSkillName, expandSkillNames, type SkillInfo, type AddSkillOptions } from "./skills.js";
 export {
   builtinAgents,

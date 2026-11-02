@@ -1,5 +1,6 @@
 import { promises as fs } from "node:fs";
 import path from "node:path";
+import { backupStamp, moveToBackup } from "./backup.js";
 import { SkillsymError } from "./errors.js";
 import { isDirectory, isFile, pathExists } from "./fsutil.js";
 import type { Hub } from "./hub.js";
@@ -8,6 +9,7 @@ import { createDirLink, readLinkTarget, removeDirLink } from "./links.js";
 import { withLock, type LockOptions } from "./lock.js";
 import { readManifest, writeManifest, type Manifest } from "./manifest.js";
 import { copyIntoHub, isValidSkillName, type SkillInfo } from "./skills.js";
+import { refreshLibrarySnapshots } from "./snapshots.js";
 import { samePath } from "./state.js";
 
 /** Folders never searched for skills inside a library. */
@@ -48,16 +50,19 @@ export async function findLibrarySkills(root: string): Promise<LibrarySkill[]> {
 
 /**
  * "add": new to the hub. "repoint" (--link only): a linked skill whose library folder moved; the hub
- * link is pointed at the new place. "unchanged" (--link only): already linked from this library.
- * "skip": reported, nothing done.
+ * link is pointed at the new place. "adopt" (--link only): the hub holds its own copy with the same
+ * content, so the hub folder becomes a link to the library and agents' links keep working.
+ * "unchanged" (--link only): already linked from this library. "skip": reported, nothing done.
  */
-export type LibraryItemType = "add" | "repoint" | "unchanged" | "skip";
+export type LibraryItemType = "add" | "repoint" | "adopt" | "unchanged" | "skip";
 
 export interface LibraryItem {
   name: string;
   path: string;
   type: LibraryItemType;
   reason?: string;
+  /** For "adopt": where the hub's own copy went. */
+  backup?: string;
 }
 
 export interface LibraryPlan {
@@ -74,6 +79,8 @@ export interface LibraryOptions {
 }
 
 export interface LibraryAddResult extends LibraryPlan {
+  /** Skills whose library snapshot could not be updated. */
+  snapshotFailed: string[];
   added: SkillInfo[];
 }
 
@@ -108,6 +115,14 @@ export async function planLibraryAdd(hub: Hub, libraryPath: string, options: Lib
       } else if (link && entry?.mode === "source-link" && entry.source && !(await isDirectory(entry.source))) {
         items.push({ name: s.name, path: s.path, type: "repoint", reason: `was linked from ${entry.source}, which no longer exists` });
         continue;
+      } else if (link && entry && entry.mode !== "source-link" && (await isDirectory(path.join(hub.skillsDir, s.name)))) {
+        if ((await hashSkillDir(s.path)) === (await hashSkillDir(path.join(hub.skillsDir, s.name)))) {
+          items.push({ name: s.name, path: s.path, type: "adopt" });
+          continue;
+        }
+        reason = `differs from the hub's copy, so nothing changed; make them match and run this again, or rename the folder`;
+      } else if (link && entry?.mode === "source-link") {
+        reason = `already linked from ${entry.source}; rename the folder to add this one too`;
       } else {
         reason = `a skill named "${s.name}" is already in the hub; remove it first (skillsym remove ${s.name}) or rename the folder`;
       }
@@ -127,25 +142,48 @@ export async function addLibrary(hub: Hub, libraryPath: string, options: Library
     async () => {
       const plan = await planLibraryAdd(hub, libraryPath, options);
       const added: SkillInfo[] = [];
+      const snapshotFailed: string[] = [];
+      const stamp = backupStamp();
       for (const item of plan.items) {
         if (item.type === "add") added.push(plan.link ? await linkIntoHub(hub, item.name, item.path) : await copyIntoHub(hub, item.name, item.path));
         else if (item.type === "repoint") added.push(await repoint(hub, item.name, item.path));
+        else if (item.type === "adopt") added.push(await adopt(hub, item, stamp));
       }
-      if (plan.link) {
+      // A library none of whose skills came through is not in use: there is nothing to remember.
+      if (plan.link && plan.items.some((i) => i.type !== "skip")) {
         const manifest = await readManifest(hub.manifestPath);
         const libraries = manifest.libraries ?? [];
         if (!libraries.some((l) => samePath(l, plan.library))) manifest.libraries = [...libraries, plan.library];
         // Adding the library again brings back anything taken out of the hub earlier.
         manifest.skippedLibrarySkills = (manifest.skippedLibrarySkills ?? []).filter((s) => !isInside(plan.library, s));
+        // Re-pointing leaves the old place empty-handed: a library that is gone with no skills in it is over.
+        const inUse = Object.values(manifest.skills).flatMap((e) => (e.mode === "source-link" && e.source ? [e.source] : []));
+        const kept: string[] = [];
+        for (const known of manifest.libraries ?? []) {
+          if (inUse.some((s) => isInside(known, s)) || (await isDirectory(known))) kept.push(known);
+        }
+        manifest.libraries = kept;
         await writeManifest(hub.manifestPath, manifest);
+        snapshotFailed.push(...(await refreshLibrarySnapshots(hub)));
       }
-      return { ...plan, added };
+      return { ...plan, added, snapshotFailed };
     },
     options.lock,
   );
 }
 
-function isInside(folder: string, p: string): boolean {
+/** Whether a folder is in a git repository: it or a parent has .git. Looks only; never runs git. */
+export async function isInGit(folder: string): Promise<boolean> {
+  let dir = path.resolve(folder);
+  for (;;) {
+    if (await pathExists(path.join(dir, ".git"))) return true;
+    const parent = path.dirname(dir);
+    if (parent === dir) return false;
+    dir = parent;
+  }
+}
+
+export function isInside(folder: string, p: string): boolean {
   const rel = path.relative(folder, p);
   return !rel.startsWith("..") && !path.isAbsolute(rel);
 }
@@ -190,6 +228,29 @@ async function linkIntoHub(hub: Hub, name: string, source: string): Promise<Skil
 }
 
 /** Point an existing linked skill at its library folder's new location; agents' links are unaffected. */
+/**
+ * Swap the hub's own copy for a link to the library. Agents link to the hub path, which stays the same,
+ * so they need no change. The copy goes to backups, and comes back if the link cannot be made.
+ */
+async function adopt(hub: Hub, item: LibraryItem, stamp: string): Promise<SkillInfo> {
+  const dest = path.join(hub.skillsDir, item.name);
+  const backup = await moveToBackup(hub, dest, "library-adopt", item.name, stamp);
+  try {
+    await createDirLink(item.path, dest);
+  } catch (err) {
+    await fs.rename(backup, dest);
+    throw err;
+  }
+  item.backup = backup;
+  const manifest = await readManifest(hub.manifestPath);
+  const entry = manifest.skills[item.name]!;
+  entry.mode = "source-link";
+  entry.source = item.path;
+  entry.sourceHash = await hashSkillDir(item.path);
+  await writeManifest(hub.manifestPath, manifest);
+  return { name: item.name, path: dest, agents: [...entry.agents], mode: "source-link", scope: "user" };
+}
+
 async function repoint(hub: Hub, name: string, source: string): Promise<SkillInfo> {
   const dest = path.join(hub.skillsDir, name);
   if ((await readLinkTarget(dest)) !== null) await removeDirLink(dest);

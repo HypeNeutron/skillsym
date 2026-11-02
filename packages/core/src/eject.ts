@@ -11,6 +11,7 @@ import { readLinkTarget, removeDirLink } from "./links.js";
 import { withLock, type LockOptions } from "./lock.js";
 import { readManifest, writeManifest, type Manifest } from "./manifest.js";
 import { expandSkillNames } from "./skills.js";
+import { removeLibrarySnapshot } from "./snapshots.js";
 import { readState, samePath, writeState, type State, type StateLink } from "./state.js";
 
 export type EjectOutcome =
@@ -223,6 +224,7 @@ async function leaveHub(hub: Hub, manifest: Manifest, name: string, dryRun: bool
   }
   forgetLibrarySkill(manifest, name);
   delete manifest.skills[name];
+  await removeLibrarySnapshot(hub, name);
   return left;
 }
 

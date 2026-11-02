@@ -17,6 +17,8 @@ Options:
   -a, --agent <ids>  Also link it into these agents; '*' = every installed agent
   --all              Same as -a '*'
   --link             Link the hub to your library instead of copying, so the library stays the source of truth.
+                     A skill the hub already holds with the same content switches to the library, keeping its
+                     agents; one that differs is left alone and reported.
                      Run it again to pick up new skills, or to point at the library's new location
   -dr, --dry-run     Preview adding a library (adding one skill changes only the hub)
   -y, --yes          Accepted; add never asks
@@ -70,7 +72,7 @@ Examples:
 Show links by status: what needs attention, unmanaged skills, news from linked libraries, and a count.
 
 Options:
-  --all              Also list links that are fine, and the name of every unmanaged skill
+  --all              Also list links that are fine, every unmanaged skill, and your libraries
   --only <states>    Only these statuses, comma-separated
   -a, --agent <ids>  Only these agents
   -s, --skill <name> Skill names, instead of listing them first
@@ -193,6 +195,29 @@ Examples:
   skillsym eject research -a claude
   skillsym eject -a gemini`,
 
+  lib: `Usage: skillsym lib [open|unlink|rm <name>] [options]     (or: skillsym library)
+
+Your libraries, the folders you linked with add --link. A library's name is its folder's name; two with the same name
+need the full path.
+
+  lib              List them: skills, whether they are there, and whether they are in git
+  lib open <name>  Print the folder and open it in your editor or file manager
+  lib unlink <name>  Stop using the library but keep its skills: each becomes a real copy in the hub, and agents keep
+                   working. If the library is gone, its snapshot is used
+  lib rm <name>    Remove its skills from the hub and every agent, asking first. To keep them, use lib unlink
+
+Neither changes your library's files.
+
+Options:
+  -dr, --dry-run     Show what unlink or rm would change; change nothing
+  -y, --yes          Do not ask first
+
+Examples:
+  skillsym lib
+  skillsym lib open my-skills
+  skillsym lib unlink my-skills --dry-run
+  skillsym lib rm my-skills`,
+
   completion: `Usage: skillsym completion <powershell|bash|zsh>
 
 Print the script that turns on Tab: commands, skill names, agents and statuses, chosen to fit what you are typing.
@@ -221,7 +246,7 @@ Examples:
   skillsym config remove windsurf`,
 };
 
-const ALIASES: Record<string, string> = { ls: "list", rm: "remove" };
+const ALIASES: Record<string, string> = { ls: "list", rm: "remove", library: "lib" };
 
 /** Help for one command, or undefined if there is no such command. */
 export function commandHelp(command: string): string | undefined {

@@ -55,6 +55,37 @@ describe("remove asks before deleting a skill from the hub", () => {
     expect((await fs.lstat(link())).isSymbolicLink()).toBe(true);
   });
 
+  it("sync offers to restore a deleted library skill only when there is a snapshot", async () => {
+    const library = path.join(root, "my-skills");
+    await makeSkill(library, "coding", { "a.md": "mine\n" });
+    await main(["add", library, "--link", "-a", "claude"], io());
+    await removeDir(library);
+
+    expect(await main(["sync"], io(["r"]))).toBe(0);
+    expect(out.join("\n")).toContain("from skillsym's latest snapshot");
+    expect(out.join("\n")).toContain("put back from the latest snapshot");
+    expect(await fs.readFile(path.join(library, "coding", "a.md"), "utf8")).toBe("mine\n");
+    expect(await fs.readFile(path.join(link(), "a.md"), "utf8")).toBe("mine\n");
+    expect(await main(["check"], io())).toBe(0);
+
+    await removeDir(library);
+    await removeDir(path.join(root, "hub", "library-snapshots"));
+    expect(await main(["sync"], io([""]))).toBe(1);
+    const text = out.join("\n");
+    expect(text).toContain("[d] drop");
+    expect(text).not.toContain("[r] restore");
+  });
+
+  it("sync does not claim to be in sync when it is about to ask", async () => {
+    await main(["add", await makeSkill(path.join(root, "src"), "coding"), "-a", "claude"], io());
+    await fs.rm(link(), { recursive: false, force: true }).catch(() => fs.rmdir(link()));
+    expect(await main(["sync", "coding"], io(["r"]))).toBe(0);
+    expect(out.join("\n")).not.toContain("Already in sync");
+    expect((await fs.lstat(link())).isSymbolicLink()).toBe(true);
+    expect(await main(["sync", "coding"], io())).toBe(0);
+    expect(out.join("\n")).toContain("Already in sync");
+  });
+
   it("removes on y", async () => {
     await main(["add", await makeSkill(path.join(root, "src"), "coding"), "-a", "claude"], io());
     expect(await main(["remove", "coding"], io(["y"]))).toBe(0);

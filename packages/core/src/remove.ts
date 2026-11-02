@@ -9,6 +9,7 @@ import { readLinkTarget, removeDirLink } from "./links.js";
 import { withLock, type LockOptions } from "./lock.js";
 import { readManifest, writeManifest, type Manifest } from "./manifest.js";
 import { expandSkillNames } from "./skills.js";
+import { removeLibrarySnapshot } from "./snapshots.js";
 import { readState, samePath, writeState, type State } from "./state.js";
 
 export type RemoveOutcome =
@@ -138,6 +139,7 @@ async function removeOne(
       } else if (await isDirectory(target)) removed.backup = await moveToBackup(hub, target, "removed", name, stamp);
       forgetLibrarySkill(manifest, name);
       delete manifest.skills[name];
+      await removeLibrarySnapshot(hub, name);
     }
     result.removedSkills.push(removed);
   } else if (!dryRun) {

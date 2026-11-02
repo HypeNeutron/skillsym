@@ -11,9 +11,10 @@ export interface CompletionSource {
   agents: () => Promise<string[]>;
   /** Agents in the config file: the only ones `config remove` can take. */
   configAgents: () => Promise<string[]>;
+  libraries: () => Promise<string[]>;
 }
 
-const ALIASES: Record<string, string> = { ls: "list", rm: "remove" };
+const ALIASES: Record<string, string> = { ls: "list", rm: "remove", library: "lib" };
 /** Options that take a value, so the word after them is not a skill name. */
 const VALUE_OPTIONS = ["-a", "--agent", "-s", "--skill", "--only"];
 export const COMPLETION_SHELLS = ["powershell", "bash", "zsh"];
@@ -58,6 +59,9 @@ export async function complete(current: string, before: string[], source: Comple
       if (!rest.length) return matching(["add", "remove"]);
       if ((rest[0] === "remove" || rest[0] === "rm") && rest.length === 1) return matching(await source.configAgents());
       return [];
+    case "lib":
+      if (!rest.length) return matching(["open", "unlink", "rm"]);
+      return rest.length === 1 ? matching(await source.libraries()) : [];
     case "open":
       return rest.length ? [] : unused(await source.skills());
     case "assign":

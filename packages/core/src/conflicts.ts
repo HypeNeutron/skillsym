@@ -9,6 +9,7 @@ import { createDirLink, readLinkTarget, removeDirLink } from "./links.js";
 import { withLock } from "./lock.js";
 import { readManifest, writeManifest, type Manifest } from "./manifest.js";
 import { isValidSkillName } from "./skills.js";
+import { restoreLibrarySkill } from "./snapshots.js";
 import { readState, samePath, writeState, type State } from "./state.js";
 import { forget, planSync, recordStateLink, type SyncConflict, type SyncConflictType, type SyncOptions } from "./sync.js";
 
@@ -29,7 +30,7 @@ const CHOICES: Record<SyncConflictType, ConflictChoice[]> = {
   "missing-owned": ["restore", "drop", "skip"],
   "hub-skill-missing": ["drop", "skip"],
   // Re-pointing needs the new library path, which `add <library> --link` takes.
-  "source-missing": ["drop", "skip"],
+  "source-missing": ["restore", "drop", "skip"],
   // Bringing someone else's folder into the hub is `import`'s job.
   blocked: ["skip"],
 };
@@ -123,6 +124,13 @@ async function resolveOne(
       return;
 
     case "restore": {
+      if (conflict.type === "source-missing") {
+        const source = manifest.skills[conflict.skill]?.source;
+        if (!source) throw new Error(`"${conflict.skill}" does not say which library it came from`);
+        await restoreLibrarySkill(hub, conflict.skill, source);
+        result.library = source;
+        return;
+      }
       if (await pathExists(conflict.path)) {
         const backup = await moveAside(hub, conflict.path, label, conflict.skill);
         if (backup) result.backups.push(backup);

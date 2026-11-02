@@ -36,10 +36,10 @@ describe("each command's help", () => {
 
   it("exists for every command, and for every command in the main help", () => {
     for (const c of helpCommands()) {
-      const name = ({ ls: "list", rm: "remove" } as Record<string, string>)[c] ?? c;
+      const name = ({ ls: "list", rm: "remove", library: "lib" } as Record<string, string>)[c] ?? c;
       expect(commands, c).toContain(name);
     }
-    expect(new Set(Object.keys(COMMAND_OPTIONS).map((c) => ({ ls: "list", rm: "remove" } as Record<string, string>)[c] ?? c))).toEqual(new Set(commands));
+    expect(new Set(Object.keys(COMMAND_OPTIONS).map((c) => ({ ls: "list", rm: "remove", library: "lib" } as Record<string, string>)[c] ?? c))).toEqual(new Set(commands));
   });
 
   it.each(Object.keys(COMMAND_OPTIONS))("%s -h documents exactly the options it accepts", (command) => {

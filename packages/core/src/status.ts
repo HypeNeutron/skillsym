@@ -6,7 +6,7 @@ import { isDirectory, isFile, isMissing } from "./fsutil.js";
 import { hashSkillDir, hasUtf8Bom } from "./hash.js";
 import type { Hub } from "./hub.js";
 import { readLinkTarget } from "./links.js";
-import { findLibrarySkills } from "./library.js";
+import { findLibrarySkills, isInGit, isInside } from "./library.js";
 import { readManifest } from "./manifest.js";
 import { expandSkillNames, isValidSkillName } from "./skills.js";
 import { readState, samePath, type StateLink } from "./state.js";
@@ -71,6 +71,8 @@ export interface LibraryReport {
   newSkills: { library: string; name: string; path: string }[];
   /** Registered library folders that no longer exist. */
   missingLibraries: string[];
+  /** Every library skillsym remembers, whether it is there, and how many hub skills link into it. */
+  folders: { path: string; found: boolean; skills: number; git: boolean }[];
 }
 
 export interface StatusReport {
@@ -96,7 +98,7 @@ export async function scanStatus(hub: Hub, options: ScanOptions = {}): Promise<S
   const entries: StatusEntry[] = [];
   const warnings: StatusWarning[] = [];
   const expectedPaths: string[] = [];
-  const libraries: LibraryReport = { missing: [], newSkills: [], missingLibraries: [] };
+  const libraries: LibraryReport = { missing: [], newSkills: [], missingLibraries: [], folders: [] };
 
   for (const name of Object.keys(manifest.skills).sort()) {
     const target = path.join(hub.skillsDir, name);
@@ -167,7 +169,10 @@ export async function scanStatus(hub: Hub, options: ScanOptions = {}): Promise<S
   }
 
   for (const library of manifest.libraries ?? []) {
-    if (!(await isDirectory(library))) {
+    const found = await isDirectory(library);
+    const skills = Object.values(manifest.skills).filter((e) => e.mode === "source-link" && e.source && isInside(library, e.source)).length;
+    libraries.folders.push({ path: library, found, skills, git: found && (await isInGit(library)) });
+    if (!found) {
       libraries.missingLibraries.push(library);
       continue;
     }
