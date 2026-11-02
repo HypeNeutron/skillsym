@@ -129,6 +129,8 @@ from, so skillsym does not give it a second copy of a skill it already sees.
 
 Options:
 
+`skillsym <command> -h` shows the details and examples for one command.
+
 | Option | Meaning |
 |---|---|
 | `-a, --agent <ids>` | Agent ids, comma-separated or repeated; `'*'` = every installed agent. |
@@ -152,7 +154,8 @@ npx skillsym assign 'gcp-*' -a claude
 npx skillsym eject '0*' -a gemini --dry-run
 ```
 
-A command refuses an option it does not act on, rather than ignoring it.
+A command refuses an option it does not act on, rather than ignoring it. If a skill name is missing or unknown, the
+error suggests close names and lists the skills you can use.
 
 Exit codes: `0` done, nothing to fix · `1` something needs your attention (drift, a conflict you skipped, a
 skipped skill) · `2` an error. With `--json`, errors are printed as `{"error": {"code", "message"}}`.

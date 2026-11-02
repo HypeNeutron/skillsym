@@ -311,6 +311,85 @@ describe("skillsym CLI", () => {
     expect((await fs.lstat(path.join(claudeDir, "dbt"))).isSymbolicLink()).toBe(false);
   });
 
+  it("shows the skills to choose from whenever a skill name is missing or unknown", async () => {
+    const empty = run(["assign", "-a", "claude"]);
+    expect(empty.code).toBe(2);
+    expect(empty.stderr).toContain("The hub has no skills yet");
+
+    run(["add", await makeSkill(path.join(root, "src"), "coding"), "-a", "claude"]);
+    run(["add", await makeSkill(path.join(root, "src"), "other")]);
+    for (const args of [
+      ["assign", "-a", "claude"],
+      ["remove"],
+      ["open"],
+      ["open", "nope"],
+      ["assign", "nope", "-a", "claude"],
+      ["assign", "nope-*", "-a", "claude"],
+      ["eject", "nope", "-y"],
+      ["remove", "nope", "-y"],
+      ["status", "nope"],
+      ["sync", "nope"],
+    ]) {
+      const r = run(args);
+      expect(r.code, args.join(" ")).toBe(2);
+      expect(r.stderr, args.join(" ")).toContain("Skills in the hub:");
+      expect(r.stderr, args.join(" ")).toContain("coding");
+      expect(r.stderr, args.join(" ")).toMatch(/other +\(not assigned\)/);
+    }
+
+    // Unrelated errors do not, and --json keeps a single object.
+    expect(run(["assign", "coding"]).stderr).not.toContain("Skills in the hub:");
+    const asJson = run(["open", "--json"]);
+    expect(asJson.stderr).not.toContain("Skills in the hub:");
+    expect(JSON.parse(asJson.stdout).error).toBeDefined();
+  });
+
+  it("suggests close names for a typo, and keeps a long list short", async () => {
+    for (const n of ["web-tools", "web-search", "plan-pipeline"]) run(["add", await makeSkill(path.join(root, "src"), n)]);
+
+    expect(run(["open", "web-tool"]).stderr).toContain("Did you mean web-tools?");
+    expect(run(["open", "WEB-TOOLS"]).stderr).toContain("Did you mean web-tools?");
+    expect(run(["open", "plan"]).stderr).toContain("Did you mean plan-pipeline?");
+    expect(run(["open", "web-"]).stderr).toContain("Did you mean web-tools or web-search?");
+    expect(run(["assign", "web-tool*", "-a", "nope"]).stderr).not.toContain("Did you mean");
+    const unrelated = run(["open", "zzzzzz"]);
+    expect(unrelated.stderr).not.toContain("Did you mean");
+    expect(unrelated.stderr).toContain("Skills in the hub:");
+    // No name was typed, so there is nothing to compare.
+    expect(run(["open"]).stderr).not.toContain("Did you mean");
+
+    await makeSkill(path.join(root, "user", ".claude", "skills"), "waiting-one");
+    const importing = run(["import", "waiting-on"]);
+    expect(importing.stderr).toContain("Did you mean waiting-one?");
+
+    for (let i = 0; i < 20; i++) run(["add", await makeSkill(path.join(root, "src"), `extra-${String(i).padStart(2, "0")}`)]);
+    const long = run(["open", "zzzzzz"]).stderr;
+    expect(long.split("(not assigned)").length - 1).toBe(20);
+    expect(long).toContain("...and 3 more: skillsym list");
+    expect(JSON.parse(run(["list", "--json"]).stdout).skills).toHaveLength(23);
+  });
+
+  it("import lists what can be imported, not what is in the hub", async () => {
+    run(["add", await makeSkill(path.join(root, "src"), "inhub")]);
+    const none = run(["import", "nope"]);
+    expect(none.code).toBe(2);
+    expect(none.stderr).toContain("Nothing in your agents' folders");
+    await makeSkill(path.join(root, "user", ".claude", "skills"), "waiting");
+    const r = run(["import", "nope"]);
+    expect(r.stderr).toContain("Skills you can import:");
+    expect(r.stderr).toContain("waiting");
+    expect(r.stderr).not.toContain("inhub");
+  });
+
+  it("advice that asks for <skill> shows the skills", async () => {
+    run(["add", await makeSkill(path.join(root, "src"), "coding")]);
+    const status = run(["status"]).stdout;
+    expect(status).toContain("assign <skill>");
+    expect(status).toContain("Skills in the hub:");
+    expect(status).toContain("coding");
+    expect(run(["config", "add", "windsurf", "~/.windsurf/skills"]).stdout).toContain("Skills in the hub:");
+  });
+
   it("refuses an option the command does not act on, changing nothing", async () => {
     run(["add", await makeSkill(path.join(root, "src"), "coding"), "-a", "claude"]);
     for (const args of [["sync", "--link"], ["status", "--dry-run"], ["list", "--link"], ["eject", "--all"], ["config", "-y"]]) {

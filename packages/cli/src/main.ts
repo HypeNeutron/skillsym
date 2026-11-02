@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { parseArgs } from "node:util";
+import { commandHelp } from "./help.js";
 import {
   addSkill,
   assignSkills,
@@ -140,12 +141,17 @@ Options:
   -p, --project      Project-level skills: not available until v0.2
   --json             Machine-readable output
   -h, --help        Show this help
-  -v, --version     Show version`;
+  -v, --version     Show version
+
+Details and examples for one command: skillsym <command> -h`;
 
 class UsageError extends Error {}
 
+/** The command needs a skill name and got none: the error comes with the names to choose from. */
+class MissingSkillName extends UsageError {}
+
 /** Options each command acts on. Any other is refused: silently ignoring -a once meant "every agent". */
-const COMMAND_OPTIONS: Record<string, string[]> = {
+export const COMMAND_OPTIONS: Record<string, string[]> = {
   init: [],
   // These never ask, but -y is a common habit and harmless.
   add: ["agent", "all", "dry-run", "link", "yes"],
@@ -164,6 +170,80 @@ const COMMAND_OPTIONS: Record<string, string[]> = {
 };
 const GLOBAL_OPTIONS = ["json", "help", "version", "global", "project"];
 
+function needsSkillNames(err: unknown): boolean {
+  if (err instanceof MissingSkillName) return true;
+  return err instanceof SkillsymError && ["SKILL_NOT_IN_HUB", "NO_SKILL_MATCHES", "NOTHING_TO_IMPORT"].includes(err.code);
+}
+
+/** Enough to choose from without burying the error above it. */
+const LIST_LIMIT = 20;
+
+function skillChoices(skills: SkillInfo[]): string {
+  const more = skills.length - LIST_LIMIT;
+  const list = formatList(skills.slice(0, LIST_LIMIT), "  ");
+  return `\nSkills in the hub:\n${list}${more > 0 ? `\n  ...and ${more} more: skillsym list` : ""}`;
+}
+
+function editDistance(a: string, b: string): number {
+  let previous = Array.from({ length: b.length + 1 }, (_, i) => i);
+  for (let i = 1; i <= a.length; i++) {
+    const current = [i];
+    for (let j = 1; j <= b.length; j++) {
+      current[j] = Math.min(previous[j]! + 1, current[j - 1]! + 1, previous[j - 1]! + (a[i - 1] === b[j - 1] ? 0 : 1));
+    }
+    previous = current;
+  }
+  return previous[b.length]!;
+}
+
+/** Up to three names close to what was typed: a typo of it, or one containing it. */
+export function closestNames(typed: string, names: string[]): string[] {
+  const wanted = typed.replace(/[*?]/g, "").toLowerCase();
+  if (!wanted) return [];
+  const allowed = Math.max(1, Math.floor(wanted.length / 3));
+  return names
+    .map((name) => ({ name, distance: editDistance(wanted, name.toLowerCase()), contains: wanted.length >= 3 && name.toLowerCase().includes(wanted) }))
+    .filter((n) => n.distance <= allowed || n.contains)
+    .sort((x, y) => x.distance - y.distance || x.name.localeCompare(y.name))
+    .slice(0, 3)
+    .map((n) => n.name);
+}
+
+function didYouMean(err: unknown, names: string[]): string | undefined {
+  if (!(err instanceof SkillsymError)) return undefined;
+  const typed = err.details.skill ?? err.details.pattern;
+  if (typeof typed !== "string") return undefined;
+  const close = closestNames(typed, names);
+  if (!close.length) return undefined;
+  const last = close.pop()!;
+  return `\nDid you mean ${close.length ? `${close.join(", ")} or ${last}` : last}?`;
+}
+
+/** After a missing or unknown skill name, show the names that would work, so nobody has to run another command. */
+async function showSkillNames(err: unknown, argv: string[], io: Io): Promise<void> {
+  try {
+    const hub = hubPaths(resolveHubHome({ env: io.env }));
+    const profiles = await loadProfiles(hub, userHome(io.env));
+    if (argv.find((a) => !a.startsWith("-")) === "import") {
+      const { unmanaged } = await scanStatus(hub, { profiles });
+      const names = [...new Set(unmanaged.map((u) => u.name))];
+      if (!names.length) return io.stderr("\nNothing in your agents' folders is waiting to be imported.");
+      const suggestion = didYouMean(err, names);
+      if (suggestion) io.stderr(suggestion);
+      const more = names.length - LIST_LIMIT;
+      io.stderr(["", "Skills you can import:", ...names.slice(0, LIST_LIMIT).map((n) => `  ${n}`), ...(more > 0 ? [`  ...and ${more} more: skillsym status --only unmanaged`] : [])].join("\n"));
+      return;
+    }
+    const skills = await listSkills(hub);
+    if (!skills.length) return io.stderr("\nThe hub has no skills yet. Add one with: skillsym add <path>");
+    const suggestion = didYouMean(err, skills.map((s) => s.name));
+    if (suggestion) io.stderr(suggestion);
+    io.stderr(skillChoices(skills));
+  } catch {
+    // The list is a courtesy; the error above already said what went wrong.
+  }
+}
+
 export async function main(argv: string[], io: Io): Promise<ExitCode> {
   const json = argv.includes("--json");
   try {
@@ -173,7 +253,9 @@ export async function main(argv: string[], io: Io): Promise<ExitCode> {
       io.stdout("\nCancelled. None of your answers were applied; run the command again when you are ready to decide.");
       return 1;
     }
-    return report(err, io, json);
+    const code = report(err, io, json);
+    if (!json && needsSkillNames(err)) await showSkillNames(err, argv, io);
+    return code;
   }
 }
 
@@ -184,7 +266,15 @@ async function run(argv: string[], io: Io, json: boolean): Promise<ExitCode> {
     return 0;
   }
   const [command, ...rest] = positionals;
-  if (values.help || !command) {
+  // `skillsym help status` and `skillsym status -h` are the same thing.
+  const helpFor = command === "help" ? rest[0] : values.help ? command : undefined;
+  if (helpFor) {
+    const text = commandHelp(helpFor);
+    if (!text) throw new UsageError(`Unknown command "${helpFor}".\n\n${USAGE}`);
+    io.stdout(text);
+    return 0;
+  }
+  if (command === "help" || values.help || !command) {
     io.stdout(USAGE);
     return command || values.help ? 0 : 2;
   }
@@ -258,7 +348,7 @@ async function run(argv: string[], io: Io, json: boolean): Promise<ExitCode> {
     }
     case "assign": {
       const skills = values.all ? ["*"] : [...rest, ...(values.skill ?? [])];
-      if (!skills.length) throw new UsageError("assign needs skill names: skillsym assign <skill...> -a <agents>");
+      if (!skills.length) throw new MissingSkillName("assign needs skill names: skillsym assign <skill...> -a <agents>");
       if (!agents.length) throw new UsageError("assign needs agents: -a claude,codex (or -a '*')");
       const { results } = await assignSkills(hub, { skills, agents, profiles });
       if (json) io.stdout(JSON.stringify({ assigned: results }));
@@ -295,7 +385,14 @@ async function run(argv: string[], io: Io, json: boolean): Promise<ExitCode> {
       // What is clean depends on what was asked about; a report on everything keeps its library checks.
       if (filtered || only.length) view.clean = view.entries.every((e) => e.status === "synced" || e.status === "covered");
       if (json) io.stdout(JSON.stringify(view));
-      else io.stdout(formatStatus(view, Boolean(values.all) || only.length > 0, filtered || only.length > 0));
+      else {
+        io.stdout(formatStatus(view, Boolean(values.all) || only.length > 0, filtered || only.length > 0));
+        // It just said "assign <skill>": show which.
+        if (!report.entries.length && !filtered && !only.length) {
+          const inHub = await listSkills(hub);
+          if (inHub.length) io.stdout(skillChoices(inHub));
+        }
+      }
       return command === "check" && !view.clean ? 1 : 0;
     }
     case "sync": {
@@ -372,7 +469,7 @@ async function run(argv: string[], io: Io, json: boolean): Promise<ExitCode> {
     case "remove":
     case "rm": {
       const skills = values.all ? ["*"] : [...rest, ...(values.skill ?? [])];
-      if (!skills.length) throw new UsageError("remove needs skill names: skillsym remove <skill...> [-a <agents>]");
+      if (!skills.length) throw new MissingSkillName("remove needs skill names: skillsym remove <skill...> [-a <agents>]");
       // With -a only those agents are unassigned; without it the skill leaves the hub entirely.
       const dropAgents = values.agent?.length ? values.agent : undefined;
       const dryRun = Boolean(values["dry-run"]);
@@ -421,7 +518,7 @@ async function run(argv: string[], io: Io, json: boolean): Promise<ExitCode> {
       return report.results.some((r) => r.outcome === "failed") ? 2 : 0;
     }
     case "open": {
-      if (rest.length !== 1) throw new UsageError("open takes one skill name: skillsym open <skill>");
+      if (rest.length !== 1) throw new MissingSkillName("open takes one skill name: skillsym open <skill>");
       const skill = (await listSkills(hub)).find((s) => s.name === rest[0]);
       if (!skill) throw new SkillsymError("SKILL_NOT_IN_HUB", `No skill named "${rest[0]}" in the hub.`, { skill: rest[0] });
       // A --link skill is edited where it really lives: in the library.
@@ -450,6 +547,8 @@ async function run(argv: string[], io: Io, json: boolean): Promise<ExitCode> {
               `If it also loads skills from other folders, add "alsoReads" in ${hub.configPath}.`,
             ].join("\n"),
           );
+          const inHub = await listSkills(hub);
+          if (inHub.length) io.stdout(skillChoices(inHub));
         }
         return 0;
       }
@@ -802,13 +901,13 @@ function parseCommandLine(argv: string[]) {
   }
 }
 
-function formatList(skills: SkillInfo[]): string {
+function formatList(skills: SkillInfo[], indent = ""): string {
   if (!skills.length) return "No skills in the hub yet. Add one with: skillsym add <path>";
   const width = Math.max(...skills.map((s) => s.name.length));
   return skills
     .map((s) => {
       const line = `${s.name.padEnd(width)}  ${s.agents.length ? s.agents.join(", ") : "(not assigned)"}`;
-      return s.mode === "source-link" && s.source ? `${line}  [linked from ${s.source}]` : line;
+      return indent + (s.mode === "source-link" && s.source ? `${line}  [linked from ${s.source}]` : line);
     })
     .join("\n");
 }
@@ -1037,8 +1136,7 @@ const NEXT_STEP: Record<string, string> = {
   USAGE: "Run `skillsym --help` to see the commands and options.",
   LOCK_TIMEOUT: "Another skillsym command is running; wait for it and try again. A lock left by a crashed run is cleared automatically.",
   CONFIG_INVALID: "Fix the file, or delete it to use only the built-in agents.",
-  UNKNOWN_AGENT: "Agents that are not built in can be added in config.json in the hub folder.",
-  SKILL_NOT_IN_HUB: "See what is in the hub with `skillsym list`.",
+  UNKNOWN_AGENT: "Add another agent with `skillsym config add <id> <folder>`.",
   INVALID_SKILL_NAME: "Use only letters, digits, \".\", \"_\" and \"-\", starting with a letter or digit.",
   MANIFEST_CORRUPT: "Restore manifest.json from a backup, or fix the JSON by hand; skillsym will not overwrite it.",
   STATE_CORRUPT: "Fix state.json by hand, or delete it and run `skillsym sync` to rebuild it from the links on disk.",
