@@ -43,7 +43,8 @@ export function expandSkillNames(requested: string[], names: string[]): string[]
     const source = item.replace(/[.+^${}()|[\]\\]/g, "\\$&").replace(/\*/g, ".*").replace(/\?/g, ".");
     const pattern = new RegExp(`^${source}$`);
     const matches = names.filter((n) => pattern.test(n));
-    if (!matches.length) throw new SkillsymError("NO_SKILL_MATCHES", `No skill matches "${item}".`, { pattern: item });
+    // "*" means every skill, and having none is not a mistake; a narrower pattern that finds nothing is.
+    if (!matches.length && item !== "*") throw new SkillsymError("NO_SKILL_MATCHES", `No skill matches "${item}".`, { pattern: item });
     for (const m of matches) result.add(m);
   }
   return [...result].sort();

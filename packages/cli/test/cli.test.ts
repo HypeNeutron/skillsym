@@ -402,6 +402,54 @@ describe("skillsym CLI", () => {
     expect(run(["-d"]).code).toBe(2);
   });
 
+  it("--all with -a means every skill for those agents only", async () => {
+    run(["add", await makeSkill(path.join(root, "src"), "coding")]);
+    run(["add", await makeSkill(path.join(root, "src"), "other")]);
+    await fs.mkdir(path.join(root, "user", ".claude"), { recursive: true });
+
+    expect(run(["assign", "--all", "-a", "codex"]).code).toBe(0);
+    const skills = JSON.parse(run(["list", "--json"]).stdout).skills as { agents: string[] }[];
+    expect(skills.map((s) => s.agents)).toEqual([["codex"], ["codex"]]);
+    await expect(fs.lstat(path.join(root, "user", ".claude", "skills", "coding"))).rejects.toThrow();
+
+    run(["add", await makeSkill(path.join(root, "src"), "third"), "--all", "-a", "universal"]);
+    const third = (JSON.parse(run(["list", "--json"]).stdout).skills as { name: string; agents: string[] }[]).find((s) => s.name === "third");
+    expect(third?.agents).toEqual(["universal"]);
+
+    expect(run(["assign", "--all"]).code).toBe(0);
+    const everyone = JSON.parse(run(["list", "--json"]).stdout).skills as { agents: string[] }[];
+    expect(everyone[0]!.agents).toContain("claude");
+  });
+
+  it("explains a * the shell turned into file names", async () => {
+    run(["add", await makeSkill(path.join(root, "src"), "coding")]);
+    const work = path.join(root, "work");
+    await fs.mkdir(path.join(work, "AppData"), { recursive: true });
+    await fs.writeFile(path.join(work, "notes.txt"), "x");
+    const inWork = (args: string[]) => spawnSync(process.execPath, [BIN, ...args], { encoding: "utf8", env: env(), cwd: work });
+
+    const r = inWork(["assign", "AppData", "notes.txt", "-a", "claude"]);
+    expect(r.status).toBe(2);
+    expect(r.stderr).toContain("Put it in quotes: '*'");
+    expect(r.stderr).toContain("Skills in the hub:");
+    for (const args of [["eject", "AppData", "notes.txt", "-y"], ["remove", "AppData", "notes.txt", "-y"], ["status", "AppData", "notes.txt"]]) {
+      expect(inWork(args).stderr, args.join(" ")).toContain("Put it in quotes");
+    }
+
+    // One name, or a name that is no file here, is just an unknown skill.
+    expect(inWork(["open", "AppData"]).stderr).not.toContain("Put it in quotes");
+    expect(inWork(["assign", "AppData", "nope", "-a", "claude"]).stderr).not.toContain("Put it in quotes");
+    expect(inWork(["assign", "AppData", "notes.txt", "-a", "claude", "--json"]).stderr).not.toContain("Put it in quotes");
+  });
+
+  it("a quoted * on an empty hub is nothing to do, not an error", () => {
+    const r = run(["assign", "*", "-a", "claude"]);
+    expect(r.code).toBe(0);
+    expect(r.stdout).toContain("the hub has no skills yet");
+    expect(run(["assign", "--all"]).code).toBe(0);
+    expect(run(["assign", "gcp-*", "-a", "claude"]).code).toBe(2);
+  });
+
   it("refuses an option the command does not act on, changing nothing", async () => {
     run(["add", await makeSkill(path.join(root, "src"), "coding"), "-a", "claude"]);
     for (const args of [["sync", "--link"], ["status", "--dry-run"], ["list", "--link"], ["eject", "--all"], ["config", "-y"]]) {

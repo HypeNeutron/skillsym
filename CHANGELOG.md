@@ -38,4 +38,6 @@ First release: the command line tool.
 - Tested with Claude Code, Codex and Cursor on Windows. On macOS and Linux the link handling is tested in CI, but
   not yet with the agents themselves; reports are welcome.
 - Cursor loads skills only when it starts: restart it after changing a skill.
+- Agents that do not follow links cannot read skills skillsym links to them, though `status` shows `synced`. Antigravity
+  CLI 1.4.12 on Windows ignores junctions; `eject -a <agent>` gives it real copies, which skillsym no longer manages.
 - User-level skills only; project-level skills (`-p`) arrive in v0.2.

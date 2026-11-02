@@ -27,6 +27,19 @@ Node.js 20 or later. Works on Windows, macOS and Linux.
 is tested in CI, but it has not yet been tried with the agents themselves. If you use it there, please
 [open an issue](https://github.com/HypeNeutron/skillsym/issues) and say whether your agents picked up the skills.
 
+**Agents that do not read links:** skillsym needs an agent to follow links, and not all do. Antigravity CLI 1.4.12 on
+Windows does not load skills through a junction: `skillsym status` says `synced`, because the link is in place, but
+the agent does not list the skill. The Antigravity IDE has been reported to ignore symlinks on macOS as well.
+
+Until skillsym can install real copies for such an agent, give it copies yourself:
+
+```bash
+npx skillsym eject -a <agent>
+```
+
+The agent then loads the skills, but skillsym no longer manages them: edits in the hub do not reach those copies, and
+`import` would turn them back into links the agent cannot read.
+
 ## Quickstart
 
 Already have skills in your agents' folders? Bring them in:
@@ -198,7 +211,7 @@ Options:
 |---|---|
 | `-a, --agent <ids>` | Agent ids, comma-separated or repeated; `'*'` = every installed agent. |
 | `-s, --skill <name>` | Skill names (instead of positional names); `'*'` = every skill in the hub. |
-| `--all` | `add`, `assign`, `remove`: every skill to every installed agent (`-s '*' -a '*'`). `status`, `check`: list every link. |
+| `--all` | `assign`: every skill, to every installed agent unless `-a` names some. `add`: every installed agent. `remove`: every skill. `status`, `check`: list every link. |
 | `-dr, --dry-run` | Show what would change; change nothing. |
 | `--only <states>` | `status`, `check`: only these statuses, comma-separated (see [Status at a glance](#status-at-a-glance)). |
 | `--link` | With `add`: link to your library instead of copying it. |
@@ -210,7 +223,7 @@ Options:
 | `-v, --version` | Show the version. |
 
 `assign`, `remove`, `eject` and `import` also take name patterns, where `*` means any characters and `?` one. Keep
-the quotes so your shell does not expand them:
+the quotes: without them, bash and zsh replace `*` with the names of the files in the current folder.
 
 ```bash
 npx skillsym assign 'gcp-*' -a claude

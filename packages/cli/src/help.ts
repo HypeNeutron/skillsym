@@ -34,14 +34,16 @@ agent's folder gets no second link.
 Options:
   -a, --agent <ids>  Agents, comma-separated or repeated; '*' = every installed agent
   -s, --skill <name> Skill names, instead of listing them first; '*' = every skill in the hub
-  --all              Every skill to every installed agent (-s '*' -a '*')
+  --all              Every skill; to every installed agent, unless -a names some
   -y, --yes          Accepted; assign never asks
 
-Names may be patterns: * means any characters, ? one. Keep the quotes.
+Names may be patterns: * means any characters, ? one. Keep the quotes, or bash and zsh replace * with file names.
 
 Examples:
   skillsym assign research -a claude,codex
   skillsym assign 'gcp-*' -a claude
+  skillsym assign '*' -a codex
+  skillsym assign --all -a codex
   skillsym assign --all`,
 
   list: `Usage: skillsym list [options]     (or: skillsym ls)

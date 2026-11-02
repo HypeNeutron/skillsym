@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { readFileSync } from "node:fs";
+import { lstatSync, readFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { parseArgs } from "node:util";
@@ -134,7 +134,8 @@ Options:
   -s, --skill <name> Skill names (alternative to positional names); '*' = all skills in the hub
                      Names in assign, remove, eject and import may be patterns: 'gcp-*', 'skill-?'
   --only <states>    status, check: only these statuses, comma-separated (synced, covered, missing, ...)
-  --all              assign, add, remove: all skills and installed agents (same as -s '*' -a '*');
+  --all              assign: every skill, to every installed agent unless -a names some;
+                     add: every installed agent; remove: every skill;
                      status, check: list every link
   -dr, --dry-run     Show what would change without changing anything
   --link             With add: link to your library instead of copying (the library stays the source of truth)
@@ -212,6 +213,23 @@ export function closestNames(typed: string, names: string[]): string[] {
     .map((n) => n.name);
 }
 
+/**
+ * bash and zsh turn an unquoted * into the file names here before skillsym runs, so "assign * -a x"
+ * arrives as "assign AppData Contacts ... -a x". Several names that are all files here give that away.
+ */
+function shellExpandedStar(argv: string[], cwd: string): boolean {
+  const names = argv.filter((word, i) => !word.startsWith("-") && !["-a", "--agent", "-s", "--skill", "--only"].includes(argv[i - 1] ?? "")).slice(1);
+  if (names.length < 2) return false;
+  return names.every((name) => {
+    try {
+      lstatSync(path.resolve(cwd, name));
+      return true;
+    } catch {
+      return false;
+    }
+  });
+}
+
 function didYouMean(err: unknown, names: string[]): string | undefined {
   if (!(err instanceof SkillsymError)) return undefined;
   const typed = err.details.skill ?? err.details.pattern;
@@ -225,13 +243,15 @@ function didYouMean(err: unknown, names: string[]): string | undefined {
 /** After a missing or unknown skill name, show the names that would work, so nobody has to run another command. */
 async function showSkillNames(err: unknown, argv: string[], io: Io): Promise<void> {
   try {
+    const expanded = shellExpandedStar(argv, io.cwd ?? process.cwd());
+    if (expanded) io.stderr("\nIt looks like your shell turned * into the names of the files in this folder. Put it in quotes: '*'");
     const hub = hubPaths(resolveHubHome({ env: io.env }));
     const profiles = await loadProfiles(hub, userHome(io.env));
     if (argv.find((a) => !a.startsWith("-")) === "import") {
       const { unmanaged } = await scanStatus(hub, { profiles });
       const names = [...new Set(unmanaged.map((u) => u.name))];
       if (!names.length) return io.stderr("\nNothing in your agents' folders is waiting to be imported.");
-      const suggestion = didYouMean(err, names);
+      const suggestion = expanded ? undefined : didYouMean(err, names);
       if (suggestion) io.stderr(suggestion);
       const more = names.length - LIST_LIMIT;
       io.stderr(["", "Skills you can import:", ...names.slice(0, LIST_LIMIT).map((n) => `  ${n}`), ...(more > 0 ? [`  ...and ${more} more: skillsym status --only unmanaged`] : [])].join("\n"));
@@ -239,7 +259,7 @@ async function showSkillNames(err: unknown, argv: string[], io: Io): Promise<voi
     }
     const skills = await listSkills(hub);
     if (!skills.length) return io.stderr("\nThe hub has no skills yet. Add one with: skillsym add <path>");
-    const suggestion = didYouMean(err, skills.map((s) => s.name));
+    const suggestion = expanded ? undefined : didYouMean(err, skills.map((s) => s.name));
     if (suggestion) io.stderr(suggestion);
     io.stderr(skillChoices(skills));
   } catch {
@@ -351,7 +371,8 @@ async function run(argv: string[], io: Io, json: boolean): Promise<ExitCode> {
   const hub = writes ? await openHub(home) : hubPaths(home);
   // Agents' folders come from the env we were given, never from process-global state.
   const profiles = await loadProfiles(hub, userHome(io.env));
-  const agents = values.all ? ["*"] : (values.agent ?? []);
+  // --all fills in what was not named: "--all -a codex" is every skill, for Codex only.
+  const agents = values.agent?.length ? values.agent : values.all ? ["*"] : [];
   const showsPending = writes || command === "status" || command === "check";
   const locationWarnings = hubLocationWarnings(hub, io.env);
   if (writes && !json) for (const w of locationWarnings) io.stderr(`warning: ${w.message}`);
@@ -385,7 +406,7 @@ async function run(argv: string[], io: Io, json: boolean): Promise<ExitCode> {
       if (!agents.length) throw new UsageError("assign needs agents: -a claude,codex (or -a '*')");
       const { results } = await assignSkills(hub, { skills, agents, profiles });
       if (json) io.stdout(JSON.stringify({ assigned: results }));
-      else io.stdout(formatLinks(results));
+      else io.stdout(results.length ? formatLinks(results) : "Nothing to assign: the hub has no skills yet. Add one with: skillsym add <path>");
       return exitFor(results);
     }
     case "list":
