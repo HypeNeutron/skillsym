@@ -17,7 +17,7 @@ other agents, notices when something drifts, and helps you fix it, without copyi
 - **Windows without admin rights.** Uses junctions on Windows (no Developer Mode needed) and symlinks on macOS and Linux.
 - **No telemetry, no network calls.**
 
-> Status: **0.1.0** — the command line tool. A background watcher and a desktop app are planned (see [Roadmap](#roadmap)).
+> Status: **0.1.0**, the command line tool. See the [Roadmap](#roadmap) for what may come next.
 
 ## Requirements
 
@@ -340,10 +340,13 @@ skillsym makes no network calls and collects no telemetry. Everything stays on y
 
 ## Roadmap
 
-- **v0.2** — a background watcher that notices drift as it happens; project-level skills (`-p`); turning a
-  `--link` skill into a hub copy.
-- **v0.3** — a desktop app: tray icon, dashboard, drag-and-drop assignment.
-- Later — skill version history, presets.
+What comes next depends on what people run into, so please [open an issue](https://github.com/HypeNeutron/skillsym/issues).
+The ideas so far:
+
+- Real copies for agents that do not read links, kept up to date by `sync`.
+- Project-level skills (`-p`).
+- Groups of skills, and choosing skills with the arrow keys.
+- A background watcher that notices drift as it happens.
 
 Teams: if you want to share a skill library across a team, see drift across everyone's machines, or roll out a new
 version gradually, please tell us what you need in an issue labelled `teams`.
