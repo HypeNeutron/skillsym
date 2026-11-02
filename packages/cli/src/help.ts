@@ -191,6 +191,19 @@ Examples:
   skillsym eject research -a claude
   skillsym eject -a gemini`,
 
+  completion: `Usage: skillsym completion <powershell|bash|zsh>
+
+Print the script that turns on Tab: commands, skill names, agents and statuses, chosen to fit what you are typing.
+Works with skillsym and ssym after a global install (npm install -g skillsym), not with npx.
+
+Examples:
+  skillsym completion powershell | Add-Content $PROFILE
+  skillsym completion bash >> ~/.bashrc
+  skillsym completion zsh >> ~/.zshrc
+
+Open a new terminal afterwards. Your shell files are only changed by the command you run. In PowerShell, create $PROFILE first if
+you have none, and your execution policy must allow it to run.`,
+
   config: `Usage: skillsym config [add <id> <folder> | remove <id>]
 
 Without arguments, show the config file's location and every agent with its skills folder.

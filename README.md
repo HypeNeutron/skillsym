@@ -59,6 +59,68 @@ the same command (`ssym status`, `ssym sync`):
 npm install -g skillsym
 ```
 
+### Tab completion
+
+Press Tab to fill in commands, options, skill names, agents and statuses. It works with `skillsym` and `ssym` after a
+global install (`npm install -g skillsym`), not with `npx`.
+
+Turn it on once, then open a new terminal. skillsym never edits these files itself; only the command you run does.
+
+**PowerShell**
+
+```powershell
+if (!(Test-Path $PROFILE)) { New-Item $PROFILE -ItemType File -Force | Out-Null }
+skillsym completion powershell | Add-Content $PROFILE
+```
+
+PowerShell runs `$PROFILE` only if its execution policy allows scripts. If a new terminal reports that scripts are
+disabled, check it with `Get-ExecutionPolicy`. `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned` is the usual
+setting, but it applies to every script you run, so that choice is yours.
+
+**bash**
+
+```bash
+skillsym completion bash >> ~/.bashrc
+```
+
+**zsh** (needs `compinit`, which most setups already run)
+
+```bash
+skillsym completion zsh >> ~/.zshrc
+```
+
+Then press Tab:
+
+```text
+ssym sy<Tab>                 sync
+ssym status --o<Tab>         --only
+ssym open we<Tab>            web-tools
+ssym assign x -a c<Tab>      claude  codex  cursor
+ssym assign x -a claude,c<Tab>   claude,codex  claude,cursor
+ssym status --only m<Tab>    missing
+ssym config <Tab>            add  remove
+```
+
+What it offers depends on what you are typing:
+
+| You are typing | Tab offers |
+|---|---|
+| A command | Every command, including `ls` and `rm` |
+| `--` after a command | The options that command accepts |
+| A skill for `open`, `assign`, `remove`, `eject`, `sync` | Skills in the hub, leaving out names already on the line |
+| A skill for `status`, `check` | Skills in the hub and unmanaged skills |
+| A skill for `import` | Skills that can be imported, not those in the hub |
+| After `-a` | Agents, including your own from `config.json` |
+| After `--only` | Statuses |
+| After `config remove` | Agents in your `config.json` |
+| A path for `add` | Your shell's usual file completion |
+
+Tab starts Node each time, so it can take a moment: about a quarter of a second for hub skills and longer for
+`import`, which scans your agents' folders. To turn it off, delete the lines it added from the same file.
+
+Tested in Windows PowerShell 5.1 and in bash. The zsh script has not been tried by hand yet, so please
+[open an issue](https://github.com/HypeNeutron/skillsym/issues) and say how it goes.
+
 ## How it works
 
 - The **hub** is a folder (`~/.skillsym`, or wherever `SKILLSYM_HOME` points). It holds the real skill folders,
@@ -122,6 +184,7 @@ from, so skillsym does not give it a second copy of a skill it already sees.
 | `skillsym import --continue` / `--abort` | Finish or drop an open merge. |
 | `skillsym remove <skill...> -a <agents>` | Unassign a skill from some agents. |
 | `skillsym remove <skill...>` / `rm` | Remove a skill from every agent and from the hub (the hub copy is moved to backups; a linked library is never touched). |
+| `skillsym completion <shell>` | Print the script that turns on Tab: `powershell`, `bash` or `zsh`. |
 | `skillsym config` | Show the config file's location and every agent with its skills folder. |
 | `skillsym config add <id> <folder>` / `config remove <id>` | Add an agent, or take one out (not while skills are assigned to it). |
 | `skillsym eject [--dry-run]` | Stop using skillsym: replace every link with a real copy. |

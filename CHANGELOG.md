@@ -19,6 +19,7 @@ First release: the command line tool.
   link; `--only`, names and `-a` narrow it); they classify every link (synced, covered, missing, dangling, replaced, blocked,
   orphaned, duplicate, source-missing) and list unmanaged skills; `sync` repairs what it can and asks about the rest
   (adopt, restore, fork, drop), for everything or only the skills and agents you name.
+- **Tab completion**: `completion <powershell|bash|zsh>` prints a script for commands, skill names, agents and statuses.
 - **Help**: `skillsym <command> -h` shows each command's options and examples.
 - **Choosing**: `import` and `eject` take skill names and `-a`; `list -a` shows one agent's skills. Names may be patterns
   (`'gcp-*'`). A command refuses an option it does not act on.

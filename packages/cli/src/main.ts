@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { parseArgs } from "node:util";
+import { complete, completionScript, COMPLETION_SHELLS } from "./completion.js";
 import { commandHelp } from "./help.js";
 import {
   addSkill,
@@ -119,6 +120,7 @@ Commands:
   import --continue | --abort   Finish or drop an open merge
   remove, rm <skill...> [-a]    With -a: unassign those agents only. Without: remove from every agent
                                 and from the hub (asks first; the hub copy is moved to backups)
+  completion <shell>            Print the script that turns on Tab for skill names: powershell, bash or zsh
   config                        Show the config file's location and every agent with its skills folder
   config add <id> <folder>      Add an agent to the config file
   config remove <id>            Take an agent out of the config file (not while skills are assigned to it)
@@ -167,6 +169,7 @@ export const COMMAND_OPTIONS: Record<string, string[]> = {
   eject: ["agent", "skill", "dry-run", "yes"],
   config: [],
   open: [],
+  completion: [],
 };
 const GLOBAL_OPTIONS = ["json", "help", "version", "global", "project"];
 
@@ -244,7 +247,30 @@ async function showSkillNames(err: unknown, argv: string[], io: Io): Promise<voi
   }
 }
 
+/** What the shell scripts call on Tab: one candidate per line. Never fails loudly, and never creates anything. */
+async function runComplete(argv: string[], io: Io): Promise<ExitCode> {
+  try {
+    const hub = hubPaths(resolveHubHome({ env: io.env }));
+    const home = userHome(io.env);
+    const profiles = () => loadProfiles(hub, home);
+    const candidates = await complete((argv[0] ?? "=").slice(1), argv.slice(1), {
+      commands: [...Object.keys(COMMAND_OPTIONS), "completion", "help"].sort(),
+      options: COMMAND_OPTIONS,
+      statuses: STATUS_ORDER,
+      skills: async () => (await listSkills(hub)).map((s) => s.name),
+      importable: async () => (await scanStatus(hub, { profiles: await profiles() })).unmanaged.map((u) => u.name),
+      agents: async () => (await profiles()).map((p) => p.id),
+      configAgents: async () => (await readConfig(hub.configPath)).agents.map((a) => a.id),
+    });
+    if (candidates.length) io.stdout(candidates.join("\n"));
+  } catch {
+    // A broken config must not print errors into the middle of the line being typed.
+  }
+  return 0;
+}
+
 export async function main(argv: string[], io: Io): Promise<ExitCode> {
+  if (argv[0] === "__complete") return runComplete(argv.slice(1), io);
   const json = argv.includes("--json");
   try {
     return await run(argv, io, json);
@@ -292,6 +318,13 @@ async function run(argv: string[], io: Io, json: boolean): Promise<ExitCode> {
     throw new UsageError(
       "Project scope (-p, --project) arrives in v0.2. For now skillsym manages user-level skills only (the default, -g).",
     );
+  }
+
+  if (command === "completion") {
+    const script = rest.length === 1 ? completionScript(rest[0]!) : undefined;
+    if (!script) throw new UsageError(`completion takes one shell: skillsym completion <${COMPLETION_SHELLS.join("|")}>`);
+    io.stdout(script);
+    return 0;
   }
 
   // init only writes a template; it must not create or touch the hub.
