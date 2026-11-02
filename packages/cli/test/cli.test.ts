@@ -390,6 +390,18 @@ describe("skillsym CLI", () => {
     expect(run(["config", "add", "windsurf", "~/.windsurf/skills"]).stdout).toContain("Skills in the hub:");
   });
 
+  it("-dr means --dry-run", async () => {
+    run(["add", await makeSkill(path.join(root, "src"), "coding"), "-a", "claude"]);
+    const link = path.join(root, "user", ".claude", "skills", "coding");
+    const short = run(["eject", "coding", "-dr"]);
+    expect(short.code).toBe(0);
+    expect(short.stdout).toBe(run(["eject", "coding", "--dry-run"]).stdout);
+    expect(short.stdout).toContain("would replace");
+    expect((await fs.lstat(link)).isSymbolicLink()).toBe(true);
+    expect(run(["status", "-dr"]).stderr).toContain("does not take --dry-run");
+    expect(run(["-d"]).code).toBe(2);
+  });
+
   it("refuses an option the command does not act on, changing nothing", async () => {
     run(["add", await makeSkill(path.join(root, "src"), "coding"), "-a", "claude"]);
     for (const args of [["sync", "--link"], ["status", "--dry-run"], ["list", "--link"], ["eject", "--all"], ["config", "-y"]]) {

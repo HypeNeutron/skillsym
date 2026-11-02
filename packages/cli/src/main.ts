@@ -136,7 +136,7 @@ Options:
   --only <states>    status, check: only these statuses, comma-separated (synced, covered, missing, ...)
   --all              assign, add, remove: all skills and installed agents (same as -s '*' -a '*');
                      status, check: list every link
-  --dry-run          Show what would change without changing anything
+  -dr, --dry-run     Show what would change without changing anything
   --link             With add: link to your library instead of copying (the library stays the source of truth)
   -y, --yes          Never ask questions: sync/import conflicts are reported and left alone; remove and eject proceed
   -g, --global       User-level skills (the default; accepted for familiarity with npx skills)
@@ -909,7 +909,8 @@ function formatRemove(result: RemoveResult, dryRun: boolean): string {
 function parseCommandLine(argv: string[]) {
   try {
     return parseArgs({
-      args: argv,
+      // parseArgs takes only one-letter short options, and would read -dr as -d -r.
+      args: argv.map((a) => (a === "-dr" ? "--dry-run" : a)),
       allowPositionals: true,
       strict: true,
       options: {

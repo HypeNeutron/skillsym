@@ -18,7 +18,7 @@ Options:
   --all              Same as -a '*'
   --link             Link the hub to your library instead of copying, so the library stays the source of truth.
                      Run it again to pick up new skills, or to point at the library's new location
-  --dry-run          Preview adding a library (adding one skill changes only the hub)
+  -dr, --dry-run     Preview adding a library (adding one skill changes only the hub)
   -y, --yes          Accepted; add never asks
 
 Examples:
@@ -116,7 +116,7 @@ and the second run changes nothing. Questions: Enter skips one, q skips the rest
 Options:
   -a, --agent <ids>  Only these agents
   -s, --skill <name> Skill names, instead of listing them first
-  --dry-run          Show what would change; change nothing
+  -dr, --dry-run     Show what would change; change nothing
   -y, --yes          Never ask: conflicts are reported and left alone
 
 Names may be patterns: * means any characters, ? one. Keep the quotes.
@@ -135,7 +135,7 @@ merge by themselves. For copies that differ you choose: keep one, keep both, or 
 Options:
   -a, --agent <ids>  Only copies in these agents' folders; other agents' copies are not compared or touched
   -s, --skill <name> Skill names, instead of listing them first
-  --dry-run          Show what would change; change nothing
+  -dr, --dry-run     Show what would change; change nothing
   -y, --yes          Never ask: copies that differ are reported and left alone
   --continue         Finish an open merge, after editing it
   --abort            Drop an open merge; the agents' copies were never changed
@@ -160,7 +160,7 @@ Options:
   -a, --agent <ids>  Only unassign these agents
   -s, --skill <name> Skill names, instead of listing them first; '*' = every skill in the hub
   --all              Every skill in the hub (same as -s '*')
-  --dry-run          Show what would change; change nothing
+  -dr, --dry-run     Show what would change; change nothing
   -y, --yes          Do not ask first
 
 Names may be patterns: * means any characters, ? one. Keep the quotes.
@@ -181,7 +181,7 @@ copy in backups.
 Options:
   -a, --agent <ids>  Only these agents' links
   -s, --skill <name> Skill names, instead of listing them first
-  --dry-run          Show what would change; change nothing
+  -dr, --dry-run     Show what would change; change nothing
   -y, --yes          Do not ask first
 
 Names may be patterns: * means any characters, ? one. Keep the quotes.

@@ -199,7 +199,7 @@ Options:
 | `-a, --agent <ids>` | Agent ids, comma-separated or repeated; `'*'` = every installed agent. |
 | `-s, --skill <name>` | Skill names (instead of positional names); `'*'` = every skill in the hub. |
 | `--all` | `add`, `assign`, `remove`: every skill to every installed agent (`-s '*' -a '*'`). `status`, `check`: list every link. |
-| `--dry-run` | Show what would change; change nothing. |
+| `-dr, --dry-run` | Show what would change; change nothing. |
 | `--only <states>` | `status`, `check`: only these statuses, comma-separated (see [Status at a glance](#status-at-a-glance)). |
 | `--link` | With `add`: link to your library instead of copying it. |
 | `-y, --yes` | Never ask. Conflicts are reported and left alone; `remove` and `eject` proceed. |

@@ -47,7 +47,7 @@ describe("each command's help", () => {
     expect(r.status).toBe(0);
     expect(r.stdout).toContain("Usage: skillsym");
     // Option lines only: prose may mention another command's option ("a --link skill").
-    const named = [...r.stdout.matchAll(/^ {2}(?:-[a-z], )?--([a-z][a-z-]*)/gm)].map((m) => m[1]!);
+    const named = [...r.stdout.matchAll(/^ {2}(?:-[a-z]+, )?--([a-z][a-z-]*)/gm)].map((m) => m[1]!);
     expect(named.sort()).toEqual([...COMMAND_OPTIONS[command]!].sort());
   });
 
