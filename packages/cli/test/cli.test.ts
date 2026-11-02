@@ -241,6 +241,7 @@ describe("skillsym CLI", () => {
       skillsDir: path.join(root, "user", ".windsurf", "skills"),
     });
     expect(run(["config", "extra"]).code).toBe(2);
+    expect(run(["config", "add"]).code).toBe(2);
   });
 
   it("import brings existing skills in; differing copies exit 1", async () => {
@@ -312,7 +313,7 @@ describe("skillsym CLI", () => {
 
   it("refuses an option the command does not act on, changing nothing", async () => {
     run(["add", await makeSkill(path.join(root, "src"), "coding"), "-a", "claude"]);
-    for (const args of [["sync", "-a", "codex"], ["status", "--dry-run"], ["list", "--link"], ["eject", "--all"], ["config", "-y"]]) {
+    for (const args of [["sync", "--link"], ["status", "--dry-run"], ["list", "--link"], ["eject", "--all"], ["config", "-y"]]) {
       const r = run(args);
       expect(r.code, args.join(" ")).toBe(2);
       expect(r.stderr).toContain(`does not take --`);
@@ -333,8 +334,150 @@ describe("skillsym CLI", () => {
 
     await removeDirLink(path.join(root, "user", ".claude", "skills", "other"));
     const drift = run(["status"]).stdout;
-    expect(drift).toContain("MISSING   other");
+    expect(drift).toContain("MISSING (1)");
+    expect(drift).toContain("other -> claude");
     expect(drift).not.toContain("coding");
+  });
+
+  it("status groups by state and narrows by status, skill and agent", async () => {
+    for (const n of ["coding", "gcp-a", "gcp-b"]) run(["add", await makeSkill(path.join(root, "src"), n), "-a", "claude,codex"]);
+    await removeDirLink(path.join(root, "user", ".claude", "skills", "gcp-a"));
+    await removeDirLink(path.join(root, "user", ".claude", "skills", "gcp-b"));
+    await makeSkill(path.join(root, "user", ".claude", "skills"), "stray");
+
+    const all = run(["status", "--all"]).stdout;
+    expect(all.indexOf("synced (4)")).toBeLessThan(all.indexOf("MISSING (2)"));
+    expect(all.indexOf("MISSING (2)")).toBeLessThan(all.indexOf("unmanaged (1)"));
+    // Advice shared by the whole group reads once.
+    expect(all.split("will ask whether to restore it").length).toBe(2);
+
+    const entries = (args: string[]) => JSON.parse(run([...args, "--json"]).stdout).entries as { skill: string; agents: string[]; status: string }[];
+    expect(entries(["status", "--only", "missing"]).map((e) => e.skill)).toEqual(["gcp-a", "gcp-b"]);
+    const synced = run(["status", "--only", "synced"]).stdout;
+    expect(synced).toContain("synced (4)");
+    expect(synced).not.toContain("MISSING");
+    expect(synced).not.toContain("stray");
+    expect(run(["status", "--only", "unmanaged"]).stdout).toContain("stray");
+    expect(run(["status"]).stdout).not.toContain("stray");
+    expect(run(["status", "--only", "synced,MISSING"]).stdout).toContain("MISSING (2)");
+    expect(run(["status", "--only", "nope"]).code).toBe(2);
+
+    expect(new Set(entries(["status", "gcp-*"]).map((e) => e.skill))).toEqual(new Set(["gcp-a", "gcp-b"]));
+    expect(entries(["status", "-a", "codex"]).every((e) => e.agents.includes("codex"))).toBe(true);
+    expect(entries(["status", "gcp-a", "-a", "claude"]).map((e) => e.status)).toEqual(["missing"]);
+    expect(run(["status", "nope"]).code).toBe(2);
+    expect(run(["status", "--only", "dangling"]).stdout).toContain("Nothing matches");
+
+    // --all still means "every link" here, never "every agent".
+    expect(entries(["status", "--all"]).length).toBe(6);
+
+    // check answers for what was asked about.
+    expect(run(["check"]).code).toBe(1);
+    expect(run(["check", "coding"]).code).toBe(0);
+    expect(run(["check", "gcp-a"]).code).toBe(1);
+    expect(run(["check", "-a", "codex"]).code).toBe(0);
+  });
+
+  it("status gives unmanaged skills as a count per folder; --only unmanaged, --all and names list them", async () => {
+    const claudeDir = path.join(root, "user", ".claude", "skills");
+    const codexDir = path.join(root, "user", ".agents", "skills");
+    for (const n of ["u-one", "u-two"]) await makeSkill(claudeDir, n);
+    await makeSkill(codexDir, "u-three");
+
+    const short = run(["status"]).stdout;
+    expect(short).toContain("unmanaged (3)");
+    expect(short).toContain(`2 in ${claudeDir} (claude)`);
+    expect(short).toContain(`1 in ${codexDir} (`);
+    expect(short).toContain("skillsym status --only unmanaged");
+    expect(short.split(claudeDir).length).toBe(2);
+    expect(short).not.toContain("u-one");
+
+    for (const args of [["status", "--only", "unmanaged"], ["status", "--all"], ["status", "u-*"]]) {
+      const long = run(args).stdout;
+      expect(long, args.join(" ")).toContain("u-one");
+      expect(long.split(claudeDir).length).toBe(2);
+    }
+    expect(JSON.parse(run(["status", "--json"]).stdout).unmanaged).toHaveLength(3);
+  });
+
+  it("config add and remove change only the agents list, and the agent is usable at once", async () => {
+    const file = path.join(home, "config.json");
+    const added = run(["config", "add", "windsurf", "~/.windsurf/skills"]);
+    expect(added.code).toBe(0);
+    expect(added.stdout).toContain("import -a windsurf");
+    expect(JSON.parse(await fs.readFile(file, "utf8")).agents).toEqual([{ id: "windsurf", skillsDir: "~/.windsurf/skills" }]);
+
+    const report = JSON.parse(run(["config", "--json"]).stdout);
+    expect(report.agents.find((a: { id: string }) => a.id === "windsurf").skillsDir).toBe(path.join(root, "user", ".windsurf", "skills"));
+
+    // Other fields in the file stay.
+    const raw = JSON.parse(await fs.readFile(file, "utf8"));
+    await fs.writeFile(file, JSON.stringify({ ...raw, future: 1 }));
+    expect(run(["config", "add", "other", path.join(root, "elsewhere")]).code).toBe(0);
+    const after = JSON.parse(await fs.readFile(file, "utf8"));
+    expect(after.future).toBe(1);
+    expect(after.agents[1]).toEqual({ id: "other", skillsDir: path.join(root, "elsewhere") });
+
+    expect(run(["config", "add", "windsurf", "~/x"]).code).toBe(2);
+    expect(run(["config", "add", "claude", "~/x"]).stderr).toContain("built-in");
+    expect(run(["config", "add", "bad id", "~/x"]).code).toBe(2);
+    expect(run(["config", "add", "only-id"]).code).toBe(2);
+    expect(run(["config", "nope"]).code).toBe(2);
+
+    // In use: refused, with what to do; afterwards the agent's files stay.
+    run(["add", await makeSkill(path.join(root, "src"), "coding"), "-a", "windsurf"]);
+    const inUse = run(["config", "remove", "windsurf"]);
+    expect(inUse.code).toBe(2);
+    expect(inUse.stderr).toContain("eject -a windsurf");
+    expect(run(["eject", "-a", "windsurf", "-y"]).code).toBe(0);
+    expect(run(["config", "remove", "windsurf"]).code).toBe(0);
+    await fs.access(path.join(root, "user", ".windsurf", "skills", "coding", "SKILL.md"));
+    expect(JSON.parse(await fs.readFile(file, "utf8")).agents.map((a: { id: string }) => a.id)).toEqual(["other"]);
+
+    expect(run(["config", "remove", "claude"]).stderr).toContain("built-in");
+    expect(run(["config", "remove", "nope"]).code).toBe(2);
+  });
+
+  it("config add makes a relative folder absolute, from where you are", async () => {
+    const work = path.join(root, "work");
+    await fs.mkdir(work);
+    const r = spawnSync(process.execPath, [BIN, "config", "add", "here", "skills"], { encoding: "utf8", env: env(), cwd: work });
+    expect(r.status).toBe(0);
+    expect(JSON.parse(await fs.readFile(path.join(home, "config.json"), "utf8")).agents[0].skillsDir).toBe(path.join(await fs.realpath(work), "skills"));
+  });
+
+  it("sync acts only on the skills and agents named", async () => {
+    run(["add", await makeSkill(path.join(root, "src"), "coding"), "-a", "claude,codex"]);
+    run(["add", await makeSkill(path.join(root, "src"), "other"), "-a", "claude"]);
+    const movedHome = path.join(root, "hub-moved");
+    await fs.rename(home, movedHome);
+    home = movedHome;
+    const dangling = () => JSON.parse(run(["status", "--only", "dangling", "--json"]).stdout).entries.map((e: { skill: string; agents: string[] }) => `${e.skill}:${e.agents[0]}`);
+    expect(dangling()).toEqual(["coding:claude", "coding:codex", "other:claude"]);
+
+    const preview = JSON.parse(run(["sync", "other", "--dry-run", "--json"]).stdout);
+    expect(preview.actions).toMatchObject([{ type: "relink", skill: "other" }]);
+    expect(dangling()).toHaveLength(3);
+
+    expect(run(["sync", "other"]).code).toBe(0);
+    expect(dangling()).toEqual(["coding:claude", "coding:codex"]);
+    expect(run(["sync", "-a", "codex"]).code).toBe(0);
+    expect(dangling()).toEqual(["coding:claude"]);
+    expect(run(["sync", "c*", "-a", "claude"]).code).toBe(0);
+    expect(dangling()).toEqual([]);
+    expect(run(["sync", "nope"]).code).toBe(2);
+    expect(run(["sync", "nope-*"]).code).toBe(2);
+  });
+
+  it("selective sync reports only the conflicts it was asked about", async () => {
+    run(["add", await makeSkill(path.join(root, "src"), "coding"), "-a", "claude"]);
+    run(["add", await makeSkill(path.join(root, "src"), "other"), "-a", "claude"]);
+    await removeDirLink(path.join(root, "user", ".claude", "skills", "other"));
+
+    expect(run(["sync", "coding"]).code).toBe(0);
+    const asked = run(["sync", "other", "--json"]);
+    expect(asked.code).toBe(1);
+    expect(JSON.parse(asked.stdout).conflicts).toMatchObject([{ skill: "other", type: "missing-owned" }]);
   });
 
   it("list -a shows one agent's skills", async () => {
@@ -406,7 +549,8 @@ describe("skillsym CLI", () => {
       const codexDir = path.join(root, "user", ".codex", "skills");
       await makeSkill(codexDir, "mine", { "a.md": "x" });
       await makeSkill(codexDir, ".system");
-      expect(run(["status"]).stdout).toContain("unmanaged mine");
+      expect(run(["status"]).stdout).toContain("unmanaged (1)");
+      expect(run(["status", "--only", "unmanaged"]).stdout).toContain("mine");
 
       expect(run(["import"]).code).toBe(0);
       await expect(fs.lstat(path.join(codexDir, "mine"))).rejects.toThrow();

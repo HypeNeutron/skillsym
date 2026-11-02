@@ -1,13 +1,14 @@
 import { promises as fs } from "node:fs";
 import path from "node:path";
-import { builtinAgents, groupBySkillsDir, planLinkGroups, type AgentProfile } from "./agents.js";
+import { builtinAgents, groupBySkillsDir, planLinkGroups, resolveAgents, type AgentProfile } from "./agents.js";
+import { SkillsymError } from "./errors.js";
 import { isDirectory, isFile, isMissing } from "./fsutil.js";
 import { hashSkillDir, hasUtf8Bom } from "./hash.js";
 import type { Hub } from "./hub.js";
 import { readLinkTarget } from "./links.js";
 import { findLibrarySkills } from "./library.js";
 import { readManifest } from "./manifest.js";
-import { isValidSkillName } from "./skills.js";
+import { expandSkillNames, isValidSkillName } from "./skills.js";
 import { readState, samePath, type StateLink } from "./state.js";
 
 export type LinkStatus =
@@ -221,6 +222,38 @@ async function classify(
 async function sameContent(a: string, b: string): Promise<boolean> {
   if (!(await isDirectory(a)) || !(await isDirectory(b))) return false;
   return (await hashSkillDir(a)) === (await hashSkillDir(b));
+}
+
+export interface StatusFilter {
+  /** Skill names or patterns ("*" any characters, "?" one). */
+  skills?: string[];
+  /** Agent ids; "*" = every installed agent. */
+  agents?: string[];
+  profiles?: AgentProfile[];
+}
+
+/**
+ * The part of a report about these skills and agents. An entry with no agents (an orphaned link)
+ * belongs to the agents whose folder it sits in. A name in neither the hub nor the report is an error.
+ */
+export async function filterStatus(hub: Hub, report: StatusReport, filter: StatusFilter): Promise<Pick<StatusReport, "entries" | "unmanaged">> {
+  const profiles = filter.profiles ?? builtinAgents();
+  const chosen = filter.agents?.length ? await resolveAgents(filter.agents, profiles) : undefined;
+  let wanted: Set<string> | undefined;
+  if (filter.skills?.length) {
+    const manifest = await readManifest(hub.manifestPath);
+    const known = [...new Set([...Object.keys(manifest.skills), ...report.entries.map((e) => e.skill), ...report.unmanaged.map((u) => u.name)])];
+    wanted = new Set(expandSkillNames(filter.skills, known));
+    for (const name of wanted) {
+      if (!known.includes(name)) throw new SkillsymError("SKILL_NOT_IN_HUB", `No skill named "${name}" in the hub or your agents' folders.`, { skill: name });
+    }
+  }
+  const forAgent = (agents: string[], p: string) =>
+    !chosen || chosen.some((a) => agents.includes(a.id) || samePath(a.skillsDir, path.dirname(p)));
+  return {
+    entries: report.entries.filter((e) => (!wanted || wanted.has(e.skill)) && forAgent(e.agents, e.path)),
+    unmanaged: report.unmanaged.filter((u) => (!wanted || wanted.has(u.name)) && forAgent(u.agents, u.path)),
+  };
 }
 
 async function findUnmanaged(profiles: AgentProfile[], known: string[]): Promise<UnmanagedEntry[]> {

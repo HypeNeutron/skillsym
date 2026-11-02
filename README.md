@@ -77,9 +77,18 @@ npm install -g skillsym
 | `cursor` | `~/.cursor/skills` | Also reads `~/.claude/skills`, `~/.codex/skills` and `~/.agents/skills`, so it is usually *covered* by another agent's link. Reloads skills only when restarted. |
 | `universal` | `~/.agents/skills` | The shared folder several agents read. |
 
-Use `-a '*'` for every agent installed on this machine. `skillsym config` shows every agent and its folder. To add
-another agent, or change a path, edit `config.json` in the hub folder. skillsym creates it with an empty `agents`
-list, because built-in agents need no entry there:
+Use `-a '*'` for every agent installed on this machine. `skillsym config` shows every agent and its folder.
+
+Add or remove your own agents from the command line:
+
+```bash
+npx skillsym config add windsurf ~/.windsurf/skills
+npx skillsym import -a windsurf          # bring in skills already there
+npx skillsym config remove windsurf      # refused while skills are assigned to it
+```
+
+Removing an agent leaves the files in its folder alone. To change a path or set other fields, edit `config.json` in
+the hub folder. skillsym creates it with an empty `agents` list, because built-in agents need no entry there:
 
 ```json
 {
@@ -105,15 +114,16 @@ from, so skillsym does not give it a second copy of a skill it already sees.
 | `skillsym assign <skill...> -a <agents>` | Link hub skills into agents' folders. |
 | `skillsym list [-a agents]` / `ls` | List hub skills, their agents, and where linked skills come from. |
 | `skillsym open <skill>` | Print a skill's folder and open it in `$EDITOR`, or your file manager. A `--link` skill opens in your library. |
-| `skillsym status [--all]` | Show what needs attention, unmanaged skills, news from linked libraries, and a count. `--all` also lists links that are fine. |
+| `skillsym status [skill...] [-a agents] [--only states] [--all]` | Show links by status: what needs attention, unmanaged skills, news from linked libraries, and a count. `--all` also lists links that are fine; `--only` and names narrow it. |
 | `skillsym check` | Same as `status`, but exits 1 if anything is not in sync (for CI and scripts). |
-| `skillsym sync [--dry-run]` | Repair drift. Fixes what it can decide alone and asks about the rest. |
+| `skillsym sync [skill...] [-a agents] [--dry-run]` | Repair drift, optionally only for those skills or agents. Fixes what it can decide alone and asks about the rest. |
 | `skillsym import [--dry-run]` | Move skills found in agents' folders into the hub. |
 | `skillsym import <skill...> [-a agents]` / `import -a <agents>` | Only those skills, or only copies in those agents' folders. Other agents' copies are not compared or touched. |
 | `skillsym import --continue` / `--abort` | Finish or drop an open merge. |
 | `skillsym remove <skill...> -a <agents>` | Unassign a skill from some agents. |
 | `skillsym remove <skill...>` / `rm` | Remove a skill from every agent and from the hub (the hub copy is moved to backups; a linked library is never touched). |
 | `skillsym config` | Show the config file's location and every agent with its skills folder. |
+| `skillsym config add <id> <folder>` / `config remove <id>` | Add an agent, or take one out (not while skills are assigned to it). |
 | `skillsym eject [--dry-run]` | Stop using skillsym: replace every link with a real copy. |
 | `skillsym eject <skill...> [-a agents]` / `eject -a <agents>` | Give back only these: their links become real copies of the latest hub version, and everything else stays managed. |
 
@@ -125,6 +135,7 @@ Options:
 | `-s, --skill <name>` | Skill names (instead of positional names); `'*'` = every skill in the hub. |
 | `--all` | `add`, `assign`, `remove`: every skill to every installed agent (`-s '*' -a '*'`). `status`, `check`: list every link. |
 | `--dry-run` | Show what would change; change nothing. |
+| `--only <states>` | `status`, `check`: only these statuses, comma-separated (see [Status at a glance](#status-at-a-glance)). |
 | `--link` | With `add`: link to your library instead of copying it. |
 | `-y, --yes` | Never ask. Conflicts are reported and left alone; `remove` and `eject` proceed. |
 | `-g, --global` | User-level skills (the default). |
@@ -160,6 +171,15 @@ skipped skill) · `2` an error. With `--json`, errors are printed as `{"error": 
 | `duplicate` | Our link duplicates a skill the agent already sees elsewhere. | Removes the link. |
 | `source-missing` | A `--link` skill's library folder is gone. | Asks — drop, or skip and run `add <new path> --link`. |
 | `unmanaged` | A skill folder skillsym does not manage. | Leaves it; use `import`. |
+
+Look at one status, then act on just those skills:
+
+```bash
+npx skillsym status --only missing,replaced
+npx skillsym status 'gcp-*' -a codex --all
+npx skillsym sync web-tools --dry-run
+npx skillsym sync -a codex
+```
 
 ## Answering questions
 

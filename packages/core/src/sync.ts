@@ -8,7 +8,7 @@ import type { Hub } from "./hub.js";
 import { createDirLink, readLinkTarget, removeDirLink } from "./links.js";
 import { withLock, type LockOptions } from "./lock.js";
 import { readState, samePath, writeState, type State } from "./state.js";
-import { scanStatus, type StatusEntry } from "./status.js";
+import { filterStatus, scanStatus, type StatusEntry } from "./status.js";
 
 export type SyncActionType =
   /** Assigned but never linked: create the link. */
@@ -72,15 +72,25 @@ export interface SyncResult extends SyncPlan {
 
 export interface SyncOptions {
   profiles?: AgentProfile[];
+  /** Only these skills (names or patterns). */
+  skills?: string[];
+  /** Only these agents. */
+  agents?: string[];
   lock?: LockOptions;
 }
 
 /** Work out what sync would do. Read-only. */
 export async function planSync(hub: Hub, options: SyncOptions = {}): Promise<SyncPlan> {
-  const report = await scanStatus(hub, { profiles: options.profiles ?? builtinAgents() });
+  const profiles = options.profiles ?? builtinAgents();
+  const report = await scanStatus(hub, { profiles });
+  const { entries } = await filterStatus(hub, report, {
+    profiles,
+    ...(options.skills ? { skills: options.skills } : {}),
+    ...(options.agents ? { agents: options.agents } : {}),
+  });
   const state = await readState(hub.statePath);
   const plan: SyncPlan = { actions: [], conflicts: [] };
-  for (const e of report.entries) await planEntry(hub, state, e, plan);
+  for (const e of entries) await planEntry(hub, state, e, plan);
   return plan;
 }
 

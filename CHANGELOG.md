@@ -8,16 +8,17 @@ First release: the command line tool.
 
 - **Hub**: one folder (`~/.skillsym`, or `SKILLSYM_HOME`) holds every skill; a manifest records which agents each
   skill is assigned to, and a state file records every link skillsym created.
-- **Agents**: built-in Claude Code, Codex, Cursor and the shared `~/.agents/skills` folder; add or override agents
-  in the hub's `config.json`. An agent that already reads another agent's folder (Cursor) gets no second link.
+- **Agents**: built-in Claude Code, Codex, Cursor and the shared `~/.agents/skills` folder; add agents with
+  `config add`, or add and override them in the hub's `config.json`. An agent that already reads another agent's folder (Cursor) gets no second link.
 - **Giving back part of it**: `eject <skill...>` and `eject -a <agents>` turn only those links into real copies of
   the latest hub version.
 - **Commands**: `init`, `add`, `assign`, `list`, `status`, `check`, `sync`, `import`, `remove`, `config`, `open`, `eject`.
 - **Short name**: a global install also provides `ssym`, the same command as `skillsym`.
 - **Links**: junctions on Windows (no administrator rights or Developer Mode), symlinks on macOS and Linux.
-- **Drift**: `status` / `check` show what needs attention and a count (`--all` lists every link); they classify every link (synced, covered, missing, dangling, replaced, blocked,
+- **Drift**: `status` / `check` group links by status and show what needs attention and a count (`--all` lists every
+  link; `--only`, names and `-a` narrow it); they classify every link (synced, covered, missing, dangling, replaced, blocked,
   orphaned, duplicate, source-missing) and list unmanaged skills; `sync` repairs what it can and asks about the rest
-  (adopt, restore, fork, drop).
+  (adopt, restore, fork, drop), for everything or only the skills and agents you name.
 - **Choosing**: `import` and `eject` take skill names and `-a`; `list -a` shows one agent's skills. Names may be patterns
   (`'gcp-*'`). A command refuses an option it does not act on.
 - **Import**: brings skills already in agents' folders into the hub; identical copies merge automatically, and for

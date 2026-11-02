@@ -37,6 +37,9 @@ import {
   type LibraryItem,
   resolveConflicts,
   scanStatus,
+  addConfigAgent,
+  removeConfigAgent,
+  filterStatus,
   SkillsymError,
   sync,
   type AgentLinkResult,
@@ -98,11 +101,15 @@ Commands:
   assign <skill...> -a <agents> Link hub skills into agents' skills folders
   list, ls [-a <agents>]        List skills in the hub and their agents (with -a, only those agents' skills)
   open <skill>                  Print a skill's folder and open it in your editor (a --link skill: in your library)
-  status [--all]                Show what needs attention (missing, dangling, replaced, blocked, orphaned,
-                                duplicate, source-missing), unmanaged skills and library news, with a count;
-                                --all also lists links that are fine (synced, covered)
+  status [skill...] [-a <agents>] [--only <states>] [--all]
+                                Show what needs attention (missing, dangling, replaced, blocked, orphaned,
+                                duplicate, source-missing), unmanaged skills and library news, by status, with a
+                                count. --all also lists links that are fine (synced, covered); --only lists these
+                                statuses, comma-separated; names and -a narrow it to those skills and agents
   check                         Same as status, but exit 1 if anything is not synced (for CI and scripts)
-  sync [--dry-run]              Make the agents' folders match the manifest; asks about conflicts
+  sync [skill...] [-a <agents>] [--dry-run]
+                                Make the agents' folders match the manifest (with names or -a, only those);
+                                asks about conflicts
                                 (without a terminal, or with -y, conflicts are only reported)
   import [skill...] [-a <agents>] [--dry-run]
                                 Bring skills already in agents' folders into the hub (originals backed up,
@@ -112,6 +119,8 @@ Commands:
   remove, rm <skill...> [-a]    With -a: unassign those agents only. Without: remove from every agent
                                 and from the hub (asks first; the hub copy is moved to backups)
   config                        Show the config file's location and every agent with its skills folder
+  config add <id> <folder>      Add an agent to the config file
+  config remove <id>            Take an agent out of the config file (not while skills are assigned to it)
   eject [--dry-run]             Stop using skillsym: replace every skillsym link with a real copy (asks first;
                                 the hub is kept, delete it yourself when you are sure)
   eject <skill...> [-a <agents>] Give back only these skills or agents: their links become real copies of the
@@ -121,6 +130,7 @@ Options:
   -a, --agent <ids>  Agents: claude, codex, cursor, universal; comma-separated or repeated; '*' = all installed
   -s, --skill <name> Skill names (alternative to positional names); '*' = all skills in the hub
                      Names in assign, remove, eject and import may be patterns: 'gcp-*', 'skill-?'
+  --only <states>    status, check: only these statuses, comma-separated (synced, covered, missing, ...)
   --all              assign, add, remove: all skills and installed agents (same as -s '*' -a '*');
                      status, check: list every link
   --dry-run          Show what would change without changing anything
@@ -142,9 +152,9 @@ const COMMAND_OPTIONS: Record<string, string[]> = {
   assign: ["agent", "skill", "all", "yes"],
   list: ["agent"],
   ls: ["agent"],
-  status: ["all"],
-  check: ["all"],
-  sync: ["dry-run", "yes"],
+  status: ["all", "agent", "skill", "only"],
+  check: ["all", "agent", "skill", "only"],
+  sync: ["agent", "skill", "dry-run", "yes"],
   import: ["agent", "skill", "dry-run", "yes", "continue", "abort"],
   remove: ["agent", "skill", "all", "dry-run", "yes"],
   rm: ["agent", "skill", "all", "dry-run", "yes"],
@@ -212,7 +222,7 @@ async function run(argv: string[], io: Io, json: boolean): Promise<ExitCode> {
     return 0;
   }
 
-  const writes = ["add", "assign", "sync", "remove", "rm", "import", "eject"].includes(command) && !values["dry-run"];
+  const writes = (["add", "assign", "sync", "remove", "rm", "import", "eject"].includes(command) && !values["dry-run"]) || (command === "config" && rest.length > 0);
   // Only commands that change something create the hub; status, list and --dry-run leave the disk alone.
   const home = resolveHubHome({ env: io.env });
   const hub = writes ? await openHub(home) : hubPaths(home);
@@ -267,22 +277,37 @@ async function run(argv: string[], io: Io, json: boolean): Promise<ExitCode> {
     }
     case "status":
     case "check": {
-      if (rest.length) throw new UsageError(`${command} takes no arguments`);
       const report = await scanStatus(hub, { profiles });
       report.warnings.unshift(...locationWarnings);
-      if (json) io.stdout(JSON.stringify(report));
-      else io.stdout(formatStatus(report, Boolean(values.all)));
-      return command === "check" && !report.clean ? 1 : 0;
+      const skills = [...rest, ...(values.skill ?? [])];
+      const only = (values.only ?? []).flatMap((o) => o.split(",")).map((o) => o.trim().toLowerCase()).filter(Boolean);
+      for (const state of only) {
+        if (!STATUS_ORDER.includes(state)) throw new UsageError(`--only: unknown status "${state}". Use: ${STATUS_ORDER.join(", ")}`);
+      }
+      // values.agent, not `agents`: --all here means "list every link", not "every agent".
+      const filtered = skills.length > 0 || Boolean(values.agent?.length);
+      const chosen = await filterStatus(hub, report, { profiles, ...(skills.length ? { skills } : {}), ...(values.agent?.length ? { agents: values.agent } : {}) });
+      const view: StatusReport = {
+        ...report,
+        entries: chosen.entries.filter((e) => !only.length || only.includes(e.status)),
+        unmanaged: chosen.unmanaged.filter(() => !only.length || only.includes("unmanaged")),
+      };
+      // What is clean depends on what was asked about; a report on everything keeps its library checks.
+      if (filtered || only.length) view.clean = view.entries.every((e) => e.status === "synced" || e.status === "covered");
+      if (json) io.stdout(JSON.stringify(view));
+      else io.stdout(formatStatus(view, Boolean(values.all) || only.length > 0, filtered || only.length > 0));
+      return command === "check" && !view.clean ? 1 : 0;
     }
     case "sync": {
-      if (rest.length) throw new UsageError("sync takes no arguments");
+      const skills = [...rest, ...(values.skill ?? [])];
+      const choice = { profiles, ...(skills.length ? { skills } : {}), ...(agents.length ? { agents } : {}) };
       if (values["dry-run"]) {
-        const plan = await planSync(hub, { profiles });
+        const plan = await planSync(hub, choice);
         if (json) io.stdout(JSON.stringify({ dryRun: true, ...plan }));
         else io.stdout(formatSync(plan.actions, plan.conflicts, true));
         return plan.conflicts.length ? 1 : 0;
       }
-      const result = await sync(hub, { profiles });
+      const result = await sync(hub, choice);
       const canAsk = Boolean(io.interactive && io.ask && !json && !values.yes);
       if (json) io.stdout(JSON.stringify({ dryRun: false, ...result }));
       else io.stdout(formatSync(result.results, canAsk ? [] : result.conflicts, false));
@@ -408,7 +433,35 @@ async function run(argv: string[], io: Io, json: boolean): Promise<ExitCode> {
       return 0;
     }
     case "config": {
-      if (rest.length) throw new UsageError(`config takes no arguments; edit ${hub.configPath} to add or change agents`);
+      if (rest[0] === "add") {
+        const [, id, folder, ...extra] = rest;
+        if (!id || !folder || extra.length) throw new UsageError("config add takes an agent id and its skills folder: skillsym config add <id> <folder>");
+        // "~" stays as written, so the file works if the home folder moves; anything else is from here, not from home.
+        const skillsDir = folder === "~" || folder.startsWith("~/") || folder.startsWith("~\\") ? folder : path.resolve(io.cwd ?? process.cwd(), folder);
+        const agent = await addConfigAgent(hub, id, skillsDir);
+        if (json) io.stdout(JSON.stringify({ added: agent }));
+        else {
+          io.stdout(
+            [
+              `Added agent "${agent.id}": ${agent.skillsDir}`,
+              "Next:",
+              `  Bring in skills already there: skillsym import -a ${agent.id}`,
+              `  Or link one from the hub:      skillsym assign <skill> -a ${agent.id}`,
+              `If it also loads skills from other folders, add "alsoReads" in ${hub.configPath}.`,
+            ].join("\n"),
+          );
+        }
+        return 0;
+      }
+      if (rest[0] === "remove" || rest[0] === "rm") {
+        const [, id, ...extra] = rest;
+        if (!id || extra.length) throw new UsageError("config remove takes one agent id: skillsym config remove <id>");
+        await removeConfigAgent(hub, id);
+        if (json) io.stdout(JSON.stringify({ removed: id }));
+        else io.stdout(`Removed agent "${id}" from ${hub.configPath}. Files in its skills folder were not touched.`);
+        return 0;
+      }
+      if (rest.length) throw new UsageError(`Unknown config command "${rest[0]}". Use: skillsym config, config add <id> <folder>, config remove <id>`);
       const customIds = new Set((await readConfig(hub.configPath)).agents.map((a) => a.id));
       const rows = await Promise.all(
         profiles.map(async (p) => ({
@@ -731,6 +784,7 @@ function parseCommandLine(argv: string[]) {
         json: { type: "boolean" },
         agent: { type: "string", short: "a", multiple: true },
         skill: { type: "string", short: "s", multiple: true },
+        only: { type: "string", multiple: true },
         all: { type: "boolean" },
         "dry-run": { type: "boolean" },
         link: { type: "boolean" },
@@ -785,7 +839,7 @@ function formatConfig(file: string, exists: boolean, rows: { id: string; skillsD
     "Agents:",
     ...rows.map((r) => `  ${r.id.padEnd(width)}  ${r.skillsDir}  (${r.source}${r.installed ? "" : ", not installed"})`),
     "",
-    'To add an agent or change a folder, add to "agents" in the config file; see the README for the fields.',
+    "Add an agent with `skillsym config add <id> <folder>`; to change a folder, edit the config file (see the README).",
   ].join("\n");
 }
 
@@ -801,32 +855,63 @@ const STATUS_HINT: Record<StatusReport["entries"][number]["status"], string> = {
   duplicate: "the agent also loads this skill from another folder, so it is loaded twice; `skillsym sync` will remove this link",
 };
 
-function formatStatus(report: StatusReport, showAll: boolean): string {
+/** Fine first, so what needs attention ends up next to the summary. */
+const STATUS_ORDER = ["synced", "covered", "missing", "dangling", "replaced", "blocked", "orphaned", "duplicate", "source-missing", "unmanaged"];
+
+function entryHint(e: StatusReport["entries"][number]): string {
+  let hint = STATUS_HINT[e.status];
+  if (e.status === "covered" && e.coveredBy) hint = `loads it from ${e.coveredBy.dir} (${e.coveredBy.agents.join(", ")}); no second link needed`;
+  if (e.status === "missing" && e.owned) hint = "skillsym's link was removed; `skillsym sync` will ask whether to restore it or drop the assignment";
+  if (e.status === "replaced") hint += e.sameContent ? " by an identical copy; `skillsym sync` will re-link it" : " by different content; `skillsym sync` will ask";
+  return hint;
+}
+
+function formatStatus(report: StatusReport, showAll: boolean, filtered: boolean): string {
   const lines: string[] = [];
-  if (!report.entries.length) lines.push("No skills assigned yet. Assign one with: skillsym assign <skill> -a <agents>");
+  if (!report.entries.length && !filtered) lines.push("No skills assigned yet. Assign one with: skillsym assign <skill> -a <agents>");
+  if (!report.entries.length && !report.unmanaged.length && filtered) lines.push("Nothing matches.");
   const healthy = (s: string) => s === "synced" || s === "covered";
-  for (const e of report.entries) {
-    if (!showAll && healthy(e.status)) continue;
-    const label = e.status === "synced" || e.status === "covered" ? e.status.padEnd(8) : e.status.toUpperCase().padEnd(8);
-    const who = e.agents.length ? e.agents.join(", ") : "(unassigned)";
-    let hint = STATUS_HINT[e.status];
-    if (e.status === "covered" && e.coveredBy) hint = `loads it from ${e.coveredBy.dir} (${e.coveredBy.agents.join(", ")}); no second link needed`;
-    if (e.status === "missing" && e.owned) hint = "skillsym's link was removed; `skillsym sync` will ask whether to restore it or drop the assignment";
-    if (e.status === "replaced") hint += e.sameContent ? " by an identical copy; `skillsym sync` will re-link it" : " by different content; `skillsym sync` will ask";
-    lines.push(`${label}  ${e.skill} -> ${who}  (${e.path})${hint ? `\n          ${hint}` : ""}`);
+  for (const status of STATUS_ORDER) {
+    if (!showAll && healthy(status)) continue;
+    const group = report.entries.filter((e) => e.status === status);
+    if (!group.length) continue;
+    if (lines.length) lines.push("");
+    lines.push(`${healthy(status) ? status : status.toUpperCase()} (${group.length})`);
+    const hints = new Set(group.map(entryHint));
+    // The same advice for all of them reads once, under the heading.
+    const shared = hints.size === 1 && group.length > 1;
+    if (shared && [...hints][0]) lines.push(`  ${[...hints][0]}`);
+    const width = Math.max(...group.map((e) => e.skill.length));
+    for (const e of group) {
+      const who = e.agents.length ? e.agents.join(", ") : "(unassigned)";
+      const hint = entryHint(e);
+      lines.push(`  ${e.skill.padEnd(width)} -> ${who}  (${e.path})${hint && !shared ? `\n      ${hint}` : ""}`);
+    }
   }
-  for (const u of report.unmanaged) {
-    lines.push(`unmanaged ${u.name} in ${u.agents.join(", ")}  (${u.path})  — bring it in with \`skillsym import\``);
+  if (report.unmanaged.length) {
+    if (lines.length) lines.push("");
+    lines.push(`unmanaged (${report.unmanaged.length})`);
+    const byFolder = new Map<string, typeof report.unmanaged>();
+    for (const u of report.unmanaged) byFolder.set(path.dirname(u.path), [...(byFolder.get(path.dirname(u.path)) ?? []), u]);
+    const listNames = showAll || filtered;
+    for (const [folder, skills] of byFolder) {
+      const where = `${folder} (${skills[0]!.agents.join(", ")})`;
+      if (listNames) lines.push(`  ${where}`, ...skills.map((u) => `    ${u.name}`));
+      else lines.push(`  ${skills.length} in ${where}`);
+    }
+    lines.push(`  bring them in with \`skillsym import\`${listNames ? "" : "; `skillsym status --only unmanaged` lists them"}`);
   }
-  for (const m of report.libraries.missing.filter((m) => !report.entries.some((e) => e.skill === m.skill))) {
+  if (lines.length) lines.push("");
+  const libraries = filtered ? { missing: [], newSkills: [], missingLibraries: [] } : report.libraries;
+  for (const m of libraries.missing.filter((m) => !report.entries.some((e) => e.skill === m.skill))) {
     lines.push(`SOURCE-MISSING  ${m.skill} (not assigned)  library folder ${m.source || "(unknown)"} is gone; run \`skillsym add <new library path> --link\` if it moved`);
   }
   const byLibrary = new Map<string, string[]>();
-  for (const n of report.libraries.newSkills) byLibrary.set(n.library, [...(byLibrary.get(n.library) ?? []), n.name]);
+  for (const n of libraries.newSkills) byLibrary.set(n.library, [...(byLibrary.get(n.library) ?? []), n.name]);
   for (const [library, names] of byLibrary) {
     lines.push(`new in library ${library}: ${names.join(", ")} — add them with \`skillsym add "${library}" --link\``);
   }
-  for (const l of report.libraries.missingLibraries) {
+  for (const l of libraries.missingLibraries) {
     lines.push(`library not found: ${l} — if it moved, run \`skillsym add <new path> --link\``);
   }
   for (const w of report.warnings) lines.push(`warning: ${w.message}`);
@@ -837,7 +922,7 @@ function formatStatus(report: StatusReport, showAll: boolean): string {
   if (report.unmanaged.length) summary.push(`${report.unmanaged.length} unmanaged`);
   const hidden = !showAll && report.entries.some((e) => healthy(e.status));
   if (summary.length) lines.push("", `${summary.join(", ")}.${report.clean ? "" : " Drift found."}${hidden ? " `skillsym status --all` lists every link." : ""}`);
-  return lines.join("\n").trimStart();
+  return lines.join("\n").replace(/\n{3,}/g, "\n\n").trimStart();
 }
 
 const ACTION_TEXT: Record<SyncAction["type"], [string, string]> = {

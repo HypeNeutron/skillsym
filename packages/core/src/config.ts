@@ -3,8 +3,10 @@ import os from "node:os";
 import path from "node:path";
 import { builtinAgents, type AgentProfile } from "./agents.js";
 import { SkillsymError } from "./errors.js";
-import { writeFileIfAbsent } from "./fsutil.js";
+import { writeFileAtomic, writeFileIfAbsent } from "./fsutil.js";
 import type { Hub } from "./hub.js";
+import { withLock, type LockOptions } from "./lock.js";
+import { readManifest } from "./manifest.js";
 
 export const CONFIG_VERSION = 1;
 
@@ -77,6 +79,71 @@ export async function readConfig(file: string): Promise<Config> {
     return agent as unknown as AgentConfig;
   });
   return { version: CONFIG_VERSION, agents: result };
+}
+
+/** Add an agent to config.json, keeping everything else in the file. An id already known is refused. */
+export async function addConfigAgent(hub: Hub, id: string, skillsDir: string, options: { lock?: LockOptions } = {}): Promise<AgentConfig> {
+  if (!ID_PATTERN.test(id)) throw new SkillsymError("INVALID_AGENT_ID", `"${id}" is not a valid agent id (letters, digits, "-" or "_"; up to 32 characters).`, { id });
+  if (!skillsDir.trim()) throw new SkillsymError("INVALID_AGENT_ID", `Agent "${id}" needs a skills folder.`, { id });
+  return withLock(
+    hub.lockPath,
+    async () => {
+      const config = await readConfig(hub.configPath);
+      if (config.agents.some((a) => a.id === id)) {
+        throw new SkillsymError("AGENT_EXISTS", `Agent "${id}" is already in ${hub.configPath}; edit the file to change it.`, { id });
+      }
+      if (builtinAgents().some((a) => a.id === id)) {
+        throw new SkillsymError("AGENT_EXISTS", `"${id}" is a built-in agent. To change its folder, add it by hand in ${hub.configPath}; a new id can be added here.`, { id });
+      }
+      const agent: AgentConfig = { id, skillsDir };
+      await writeAgents(hub.configPath, [...config.agents, agent]);
+      return agent;
+    },
+    options.lock,
+  );
+}
+
+/**
+ * Take an agent out of config.json. Refused while skills are assigned to it: its links would be left
+ * with nothing to say what they belong to. A built-in agent the file overrides goes back to its default.
+ */
+export async function removeConfigAgent(hub: Hub, id: string, options: { lock?: LockOptions } = {}): Promise<void> {
+  await withLock(
+    hub.lockPath,
+    async () => {
+      const config = await readConfig(hub.configPath);
+      if (!config.agents.some((a) => a.id === id)) {
+        const builtin = builtinAgents().some((a) => a.id === id);
+        throw new SkillsymError(
+          "AGENT_NOT_IN_CONFIG",
+          builtin ? `"${id}" is a built-in agent, not one from your config, so there is nothing to remove.` : `No agent "${id}" in ${hub.configPath}.`,
+          { id },
+        );
+      }
+      const manifest = await readManifest(hub.manifestPath);
+      const assigned = Object.keys(manifest.skills).filter((name) => manifest.skills[name]!.agents.includes(id));
+      if (assigned.length) {
+        throw new SkillsymError(
+          "AGENT_IN_USE",
+          `Agent "${id}" still has ${assigned.length} skill(s) assigned. First run \`skillsym eject -a ${id}\` to leave it real copies, or \`skillsym remove '*' -a ${id}\` to unlink them.`,
+          { id, skills: assigned },
+        );
+      }
+      await writeAgents(hub.configPath, config.agents.filter((a) => a.id !== id));
+    },
+    options.lock,
+  );
+}
+
+/** Rewrite only the agents list: other fields a newer skillsym may have put in the file stay. */
+async function writeAgents(file: string, agents: AgentConfig[]): Promise<void> {
+  let raw: Record<string, unknown> = {};
+  try {
+    raw = JSON.parse((await fs.readFile(file, "utf8")).replace(/^\ufeff/, "")) as Record<string, unknown>;
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
+  }
+  await writeFileAtomic(file, `${JSON.stringify({ ...raw, version: CONFIG_VERSION, agents }, null, 2)}\n`);
 }
 
 /**
