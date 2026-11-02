@@ -8,6 +8,7 @@ import { forgetLibrarySkill } from "./library.js";
 import { readLinkTarget, removeDirLink } from "./links.js";
 import { withLock, type LockOptions } from "./lock.js";
 import { readManifest, writeManifest, type Manifest } from "./manifest.js";
+import { expandSkillNames } from "./skills.js";
 import { readState, samePath, writeState, type State } from "./state.js";
 
 export type RemoveOutcome =
@@ -69,7 +70,7 @@ export async function removeSkills(hub: Hub, options: RemoveOptions): Promise<Re
     async () => {
       const manifest = await readManifest(hub.manifestPath);
       const state = await readState(hub.statePath);
-      const names = options.skills.includes("*") ? Object.keys(manifest.skills).sort() : [...new Set(options.skills)];
+      const names = expandSkillNames(options.skills, Object.keys(manifest.skills));
       for (const name of names) {
         if (!manifest.skills[name]) throw new SkillsymError("SKILL_NOT_IN_HUB", `No skill named "${name}" in the hub.`, { skill: name });
       }

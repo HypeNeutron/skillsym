@@ -263,6 +263,53 @@ describe("skillsym CLI", () => {
     expect(conflict.stdout).toContain("CONFLICT  coding");
   });
 
+  it("assign, eject, remove and import take name patterns; one that matches nothing changes nothing", async () => {
+    for (const n of ["gcp-spark", "gcp-dataflow", "dbt", "a.b"]) run(["add", await makeSkill(path.join(root, "src"), n)]);
+    const agentsOf = async (name: string) => {
+      const skills = JSON.parse(run(["list", "--json"]).stdout).skills as { name: string; agents: string[] }[];
+      return skills.find((s) => s.name === name)?.agents;
+    };
+
+    expect(run(["assign", "gcp-*", "-a", "claude"]).code).toBe(0);
+    expect(await agentsOf("gcp-spark")).toEqual(["claude"]);
+    expect(await agentsOf("gcp-dataflow")).toEqual(["claude"]);
+    expect(await agentsOf("dbt")).toEqual([]);
+
+    // "." is literal and "?" is one character.
+    expect(run(["assign", "a?b", "-a", "claude"]).code).toBe(0);
+    expect(await agentsOf("a.b")).toEqual(["claude"]);
+    expect(run(["assign", "a.?", "dbt", "-a", "codex"]).code).toBe(0);
+    expect(await agentsOf("dbt")).toEqual(["codex"]);
+    expect(run(["assign", "gcp.spark", "-a", "codex"]).code).toBe(2);
+
+    const none = run(["assign", "nope-*", "-a", "claude"]);
+    expect(none.code).toBe(2);
+    expect(none.stderr).toContain('No skill matches "nope-*"');
+
+    const claudeLink = path.join(root, "user", ".claude", "skills", "gcp-spark");
+    expect(run(["eject", "gcp-*", "-a", "claude", "--dry-run"]).stdout).toContain("gcp-spark");
+    expect((await fs.lstat(claudeLink)).isSymbolicLink()).toBe(true);
+    expect(run(["eject", "gcp-s*", "-a", "claude", "-y"]).code).toBe(0);
+    expect((await fs.lstat(claudeLink)).isSymbolicLink()).toBe(false);
+
+    expect(run(["remove", "gcp-d*", "-y"]).code).toBe(0);
+    expect(await agentsOf("gcp-dataflow")).toBeUndefined();
+    expect(await agentsOf("dbt")).toEqual(["codex"]);
+  });
+
+  it("import patterns match only what the chosen agents hold", async () => {
+    const claudeDir = path.join(root, "user", ".claude", "skills");
+    await makeSkill(claudeDir, "gcp-spark");
+    await makeSkill(claudeDir, "gcp-flow");
+    await makeSkill(claudeDir, "dbt");
+
+    expect(run(["import", "gcp-*", "-a", "codex"]).code).toBe(2);
+    expect(run(["import", "gcp-s*"]).code).toBe(0);
+    expect((await fs.lstat(path.join(claudeDir, "gcp-spark"))).isSymbolicLink()).toBe(true);
+    expect((await fs.lstat(path.join(claudeDir, "gcp-flow"))).isSymbolicLink()).toBe(false);
+    expect((await fs.lstat(path.join(claudeDir, "dbt"))).isSymbolicLink()).toBe(false);
+  });
+
   it("refuses an option the command does not act on, changing nothing", async () => {
     run(["add", await makeSkill(path.join(root, "src"), "coding"), "-a", "claude"]);
     for (const args of [["sync", "-a", "codex"], ["status", "--dry-run"], ["list", "--link"], ["eject", "--all"], ["config", "-y"]]) {

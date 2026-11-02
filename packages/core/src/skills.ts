@@ -30,6 +30,26 @@ export function isValidSkillName(name: string): boolean {
 }
 
 /**
+ * Expand name patterns ("*" any characters, "?" one) against `names`. Plain names pass through, for
+ * the caller to report if unknown; no valid skill name holds these characters, so nothing is ambiguous.
+ */
+export function expandSkillNames(requested: string[], names: string[]): string[] {
+  const result = new Set<string>();
+  for (const item of requested) {
+    if (!/[*?]/.test(item)) {
+      result.add(item);
+      continue;
+    }
+    const source = item.replace(/[.+^${}()|[\]\\]/g, "\\$&").replace(/\*/g, ".*").replace(/\?/g, ".");
+    const pattern = new RegExp(`^${source}$`);
+    const matches = names.filter((n) => pattern.test(n));
+    if (!matches.length) throw new SkillsymError("NO_SKILL_MATCHES", `No skill matches "${item}".`, { pattern: item });
+    for (const m of matches) result.add(m);
+  }
+  return [...result].sort();
+}
+
+/**
  * Copy a skill folder (one containing SKILL.md) into the hub and record it in the manifest.
  * The skill's name is its folder name. Nothing changes if the name is taken or invalid.
  */

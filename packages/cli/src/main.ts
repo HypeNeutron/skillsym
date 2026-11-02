@@ -120,6 +120,7 @@ Commands:
 Options:
   -a, --agent <ids>  Agents: claude, codex, cursor, universal; comma-separated or repeated; '*' = all installed
   -s, --skill <name> Skill names (alternative to positional names); '*' = all skills in the hub
+                     Names in assign, remove, eject and import may be patterns: 'gcp-*', 'skill-?'
   --all              assign, add, remove: all skills and installed agents (same as -s '*' -a '*');
                      status, check: list every link
   --dry-run          Show what would change without changing anything

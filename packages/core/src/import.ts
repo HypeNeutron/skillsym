@@ -10,7 +10,7 @@ import type { Hub } from "./hub.js";
 import { createDirLink, readLinkTarget } from "./links.js";
 import { withLock, type LockOptions } from "./lock.js";
 import { readManifest, writeManifest } from "./manifest.js";
-import { isValidSkillName } from "./skills.js";
+import { expandSkillNames, isValidSkillName } from "./skills.js";
 import { readState, samePath, writeState } from "./state.js";
 import { scanStatus } from "./status.js";
 import { recordStateLink } from "./sync.js";
@@ -77,7 +77,6 @@ export async function planImport(hub: Hub, options: ImportOptions = {}): Promise
   const report = await scanStatus(hub, { profiles });
   const manifest = await readManifest(hub.manifestPath);
   const chosen = options.agents?.length ? (await resolveAgents(options.agents, profiles)).map((a) => a.id) : undefined;
-  const wanted = options.skills?.length && !options.skills.includes("*") ? new Set(options.skills) : undefined;
 
   const byName = new Map<string, ImportSource[]>();
   const items: ImportItem[] = [];
@@ -100,6 +99,10 @@ export async function planImport(hub: Hub, options: ImportOptions = {}): Promise
     if (target) foreignTargets.push(target);
   }
   for (const e of report.entries) if (!e.owned && e.linkTarget) foreignTargets.push(e.linkTarget);
+
+  // Patterns match only what could be imported from the chosen agents.
+  const importable = candidates.filter((u) => !chosen || u.agents.some((a) => chosen.includes(a))).map((u) => u.name);
+  const wanted = options.skills?.length ? new Set(expandSkillNames(options.skills, importable)) : undefined;
 
   for (const u of candidates) {
     if (wanted && !wanted.has(u.name)) continue;

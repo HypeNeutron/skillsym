@@ -18,8 +18,8 @@ First release: the command line tool.
 - **Drift**: `status` / `check` show what needs attention and a count (`--all` lists every link); they classify every link (synced, covered, missing, dangling, replaced, blocked,
   orphaned, duplicate, source-missing) and list unmanaged skills; `sync` repairs what it can and asks about the rest
   (adopt, restore, fork, drop).
-- **Choosing**: `import` and `eject` take skill names and `-a`; `list -a` shows one agent's skills. A command refuses
-  an option it does not act on.
+- **Choosing**: `import` and `eject` take skill names and `-a`; `list -a` shows one agent's skills. Names may be patterns
+  (`'gcp-*'`). A command refuses an option it does not act on.
 - **Import**: brings skills already in agents' folders into the hub; identical copies merge automatically, and for
   copies that differ you keep one, keep both, or merge with git-style markers (`import --continue` / `--abort`).
 - **Your own library**: `add <folder>` copies every skill in a folder of skills; `add <folder> --link` links to it so

@@ -133,6 +133,14 @@ Options:
 | `-h, --help` | Show the commands and options. |
 | `-v, --version` | Show the version. |
 
+`assign`, `remove`, `eject` and `import` also take name patterns, where `*` means any characters and `?` one. Keep
+the quotes so your shell does not expand them:
+
+```bash
+npx skillsym assign 'gcp-*' -a claude
+npx skillsym eject '0*' -a gemini --dry-run
+```
+
 A command refuses an option it does not act on, rather than ignoring it.
 
 Exit codes: `0` done, nothing to fix · `1` something needs your attention (drift, a conflict you skipped, a

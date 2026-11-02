@@ -13,7 +13,7 @@ export {
 } from "./manifest.js";
 export { STATE_VERSION, readState, writeState, type State, type StateLink, type LinkKind } from "./state.js";
 export { withLock, type LockOptions } from "./lock.js";
-export { addSkill, listSkills, isValidSkillName, type SkillInfo, type AddSkillOptions } from "./skills.js";
+export { addSkill, listSkills, isValidSkillName, expandSkillNames, type SkillInfo, type AddSkillOptions } from "./skills.js";
 export {
   builtinAgents,
   resolveAgents,

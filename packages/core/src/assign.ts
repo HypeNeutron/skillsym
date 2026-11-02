@@ -6,6 +6,7 @@ import { pathExists } from "./fsutil.js";
 import { hashSkillDir } from "./hash.js";
 import type { Hub } from "./hub.js";
 import { createDirLink, readLinkTarget } from "./links.js";
+import { expandSkillNames } from "./skills.js";
 import { withLock, type LockOptions } from "./lock.js";
 import { readManifest, writeManifest } from "./manifest.js";
 import { readState, samePath, writeState } from "./state.js";
@@ -59,7 +60,7 @@ export async function assignSkills(hub: Hub, options: AssignOptions): Promise<As
     async () => {
       const manifest = await readManifest(hub.manifestPath);
       const state = await readState(hub.statePath);
-      const skillNames = options.skills.includes("*") ? Object.keys(manifest.skills).sort() : unique(options.skills);
+      const skillNames = expandSkillNames(options.skills, Object.keys(manifest.skills));
       for (const name of skillNames) {
         if (!manifest.skills[name]) {
           throw new SkillsymError("SKILL_NOT_IN_HUB", `No skill named "${name}" in the hub. Add it first: skillsym add <path>`, {

@@ -10,6 +10,7 @@ import { forgetLibrarySkill } from "./library.js";
 import { readLinkTarget, removeDirLink } from "./links.js";
 import { withLock, type LockOptions } from "./lock.js";
 import { readManifest, writeManifest, type Manifest } from "./manifest.js";
+import { expandSkillNames } from "./skills.js";
 import { readState, samePath, writeState, type State, type StateLink } from "./state.js";
 
 export type EjectOutcome =
@@ -125,7 +126,7 @@ async function ejectSelected(hub: Hub, options: EjectOptions): Promise<EjectRepo
     const manifest = await readManifest(hub.manifestPath);
     const state = await readState(hub.statePath);
     const requested = options.skills?.length ? options.skills : ["*"];
-    const names = requested.includes("*") ? Object.keys(manifest.skills).sort() : [...new Set(requested)];
+    const names = expandSkillNames(requested, Object.keys(manifest.skills));
     for (const name of names) {
       if (!manifest.skills[name]) throw new SkillsymError("SKILL_NOT_IN_HUB", `No skill named "${name}" in the hub.`, { skill: name });
     }
