@@ -18,7 +18,7 @@ export async function writeFileAtomic(file: string, text: string): Promise<void>
 }
 
 /** Windows refuses to replace a file while anything has it open (another process, antivirus, an indexer); that passes quickly. */
-async function renameWithRetry(from: string, to: string): Promise<void> {
+export async function renameWithRetry(from: string, to: string): Promise<void> {
   for (let attempt = 0; ; attempt++) {
     try {
       return await fs.rename(from, to);

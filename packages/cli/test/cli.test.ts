@@ -1,8 +1,9 @@
 import { spawn, spawnSync } from "node:child_process";
 import { promises as fs } from "node:fs";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { runGit } from "@skillsym/core";
 import { makeSkill, makeTempDir, removeDir } from "../../core/test/helpers.js";
 
 // Runs the built binary, so `pnpm test` builds first.
@@ -1061,5 +1062,51 @@ describe("skillsym CLI", () => {
     expect(JSON.parse(await fs.readFile(path.join(root, "user", ".gemini", "config", "skills.json"), "utf8")).entries).toEqual([
       { path: "~/keep" },
     ]);
+  });
+
+  it("add <remote> -s <skill> and update [--dry-run|-y] handle clean updates and local-edit conflicts", async () => {
+    const repo = path.join(root, "remote-repo");
+    await fs.mkdir(repo, { recursive: true });
+    await runGit(["init", "-b", "main"], repo);
+    await runGit(["config", "user.email", "test@skillsym.dev"], repo);
+    await runGit(["config", "user.name", "Test"], repo);
+    await makeSkill(path.join(repo, "skills"), "first", { "a.md": "v1\n" });
+    await makeSkill(path.join(repo, "skills"), "second", { "a.md": "v1\n" });
+    await runGit(["add", "."], repo);
+    await runGit(["commit", "-m", "v1"], repo);
+
+    const url = pathToFileURL(repo).toString();
+    const added = run(["add", url, "-s", "first", "-a", "claude", "--json"]);
+    expect(added.code).toBe(0);
+    expect(JSON.parse(added.stdout).added.map((s: { name: string }) => s.name)).toEqual(["first"]);
+
+    const listedText = run(["list"]).stdout;
+    expect(listedText).toContain(`[1] from ${url}`);
+    expect(JSON.parse(run(["list", "--json"]).stdout).skills[0].remote.url).toBe(url);
+
+    await fs.writeFile(path.join(repo, "skills", "first", "a.md"), "v2\n");
+    await runGit(["add", "."], repo);
+    await runGit(["commit", "-m", "v2"], repo);
+
+    const preview = run(["update", "--dry-run"]);
+    expect(preview.code).toBe(0);
+    expect(preview.stdout).toContain("would update");
+    expect(await fs.readFile(path.join(home, "skills", "first", "a.md"), "utf8")).toBe("v1\n");
+
+    const updated = run(["update"]);
+    expect(updated.code).toBe(0);
+    expect(updated.stdout).toContain("updated");
+    expect(await fs.readFile(path.join(home, "skills", "first", "a.md"), "utf8")).toBe("v2\n");
+
+    // Local edit + upstream change -> update -y returns 1 and preserves local edit.
+    await fs.writeFile(path.join(home, "skills", "first", "a.md"), "local custom\n");
+    await fs.writeFile(path.join(repo, "skills", "first", "a.md"), "v3\n");
+    await runGit(["add", "."], repo);
+    await runGit(["commit", "-m", "v3"], repo);
+
+    const conflict = run(["update", "-y"]);
+    expect(conflict.code).toBe(1);
+    expect(conflict.stdout).toContain("CONFLICT");
+    expect(await fs.readFile(path.join(home, "skills", "first", "a.md"), "utf8")).toBe("local custom\n");
   });
 });

@@ -9,7 +9,7 @@ import { hashSkillDir } from "./hash.js";
 import { createDirLink, readLinkTarget, removeDirLink } from "./links.js";
 import { withLock, type LockOptions } from "./lock.js";
 import { readManifest, writeManifest, type Manifest } from "./manifest.js";
-import { copyIntoHub, isValidSkillName, type SkillInfo } from "./skills.js";
+import { copyIntoHub, expandSkillNames, isValidSkillName, type SkillInfo } from "./skills.js";
 import { refreshSkillsJsonManifests } from "./skills-json.js";
 import { refreshLibrarySnapshots } from "./snapshots.js";
 import { samePath } from "./state.js";
@@ -77,8 +77,27 @@ export interface LibraryPlan {
 export interface LibraryOptions {
   /** Link hub entries to the library (the library stays the source of truth) instead of copying. */
   link?: boolean;
+  /** Only add/inspect these skill names or glob patterns (`*`, `?`). */
+  skills?: string[];
   profiles?: AgentProfile[];
   lock?: LockOptions;
+}
+
+/** Narrow discovered skills by requested names/patterns, failing clearly if a literal name is absent. */
+export function filterLibrarySkills(found: LibrarySkill[], requested: string[] | undefined, sourceLabel: string): LibrarySkill[] {
+  if (!requested?.length) return found;
+  const expanded = expandSkillNames(requested, found.map((s) => s.name));
+  const available = new Set(found.map((s) => s.name));
+  const missing = expanded.filter((n) => !available.has(n));
+  if (missing.length) {
+    throw new SkillsymError(
+      "SKILL_NOT_FOUND_AT_PATH",
+      `Skill "${missing[0]}" not found in ${sourceLabel}. Available: ${found.map((s) => s.name).join(", ")}.`,
+      { path: sourceLabel, missing },
+    );
+  }
+  const wanted = new Set(expanded);
+  return found.filter((s) => wanted.has(s.name));
 }
 
 export interface LibraryAddResult extends LibraryPlan {
@@ -94,14 +113,15 @@ export async function planLibraryAdd(hub: Hub, libraryPath: string, options: Lib
   if (!(await isDirectory(library))) {
     throw new SkillsymError("SKILL_NOT_FOUND_AT_PATH", `Not a folder: ${library}`, { path: library });
   }
-  const skills = await findLibrarySkills(library);
-  if (!skills.length) {
+  const discovered = await findLibrarySkills(library);
+  if (!discovered.length) {
     throw new SkillsymError(
       "MISSING_SKILL_MD",
       `No skills found under ${library} (looked for folders containing SKILL.md, skipping dotfolders and node_modules).`,
       { path: library },
     );
   }
+  const skills = filterLibrarySkills(discovered, options.skills, library);
   const manifest = await readManifest(hub.manifestPath);
   const items: LibraryItem[] = [];
   for (const s of skills) {

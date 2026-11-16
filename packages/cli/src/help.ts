@@ -8,23 +8,23 @@ Examples:
   skillsym init my-skill
   skillsym add my-skill -a claude     Next step: put it in the hub and link it`,
 
-  add: `Usage: skillsym add <path> [options]
+  add: `Usage: skillsym add <path|owner/repo> [options]
 
-Copy a skill into the hub. A folder without its own SKILL.md is a library: every skill in it is added, at any
-depth, and the library itself is not changed.
+Copy a skill, local library folder, or GitHub/git repository into the hub. For GitHub/git sources or libraries, every
+skill under it is added unless filtered with -s. Local libraries stay untouched; remote repositories are cached in the
+hub for \`skillsym update\`.
 
 Options:
   -a, --agent <ids>  Also link it into these agents; '*' = every installed agent
+  -s, --skill <name> Only add matching skill(s) from a repository or library (supports '*', '?')
   --all              Same as -a '*'
-  --link             Link the hub to your library instead of copying, so the library stays the source of truth.
-                     A skill the hub already holds with the same content switches to the library, keeping its
-                     agents; one that differs is left alone and reported.
-                     Run it again to pick up new skills, or to point at the library's new location
-  -dr, --dry-run     Preview adding a library (adding one skill changes only the hub)
+  --link             Link the hub to your library (or remote cache) instead of copying, so it stays the source of truth
+  -dr, --dry-run     Preview adding from a remote repository or library
   -y, --yes          Accepted; add never asks
 
 Examples:
   skillsym add ./my-skill -a claude,codex
+  skillsym add vercel-labs/skills -s find-skills -a claude,antigravity
   skillsym add ~/my-skills --dry-run
   skillsym add ~/my-skills --link -a claude`,
 
@@ -130,6 +130,25 @@ Examples:
   skillsym sync
   skillsym sync web-tools
   skillsym sync 'gcp-*' -a codex`,
+
+  update: `Usage: skillsym update [skill...] [options]
+
+Fetch and update GitHub-tracked and git-backed skills in the hub. Backs up existing hub copies before replacing
+them, leaves locally edited skills alone until confirmed, and never deletes skills removed upstream.
+
+Options:
+  -s, --skill <name> Skill names or patterns, instead of listing them first
+  --all              Every skill in the hub (default)
+  -dr, --dry-run     Check for upstream updates without modifying hub skills
+  -y, --yes          Never ask: locally edited conflicts are reported and kept untouched
+
+Names may be patterns: * means any characters, ? one. Keep the quotes.
+
+Examples:
+  skillsym update --dry-run
+  skillsym update
+  skillsym update find-skills
+  skillsym update 'gcp-*'`,
 
   import: `Usage: skillsym import [skill...] [options]
 

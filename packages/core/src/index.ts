@@ -8,6 +8,7 @@ export {
   emptyManifest,
   type Manifest,
   type ManifestSkill,
+  type RemoteSkillInfo,
   type SkillMode,
   type SkillScope,
 } from "./manifest.js";
@@ -16,7 +17,7 @@ export { withLock, type LockOptions } from "./lock.js";
 export { hasLibrarySnapshot, refreshLibrarySnapshots } from "./snapshots.js";
 export { findLibrary, listLibraries, removeLibrary, unlinkLibrary, type LibraryInfo, type UnlinkResult, type UnlinkedSkill } from "./libraries.js";
 export { isInGit } from "./library.js";
-export { addSkill, listSkills, isValidSkillName, expandSkillNames, type SkillInfo, type AddSkillOptions } from "./skills.js";
+export { addSkill, listSkills, replaceHubSkillFromSource, isValidSkillName, expandSkillNames, type SkillInfo, type AddSkillOptions } from "./skills.js";
 export {
   agentDelivery,
   builtinAgents,
@@ -94,6 +95,7 @@ export {
 export { initSkill, type InitResult } from "./init.js";
 export {
   findLibrarySkills,
+  filterLibrarySkills,
   planLibraryAdd,
   addLibrary,
   type LibrarySkill,
@@ -101,6 +103,7 @@ export {
   type LibraryItemType,
   type LibraryPlan,
   type LibraryAddResult,
+  type LibraryOptions,
 } from "./library.js";
 export { cloudSyncProvider, hubLocationWarnings } from "./safety.js";
 export {
@@ -135,3 +138,36 @@ export {
   type AgentLinkResult,
   type LinkOutcome,
 } from "./assign.js";
+export {
+  planUpdate,
+  updateSkills,
+  resolveUpdateConflicts,
+  type UpdateItemStatus,
+  type UpdateItem,
+  type UpdateOptions,
+  type UpdatePlan,
+  type UpdateResult,
+  type UpdateChoice,
+  type UpdateDecision,
+  type UpdateResolution,
+} from "./update.js";
+export {
+  parseRemoteTarget,
+  syncRemoteClone,
+  planRemoteAdd,
+  addRemoteSkills,
+  inspectLocalGitSource,
+  runGit,
+  slugForRemote,
+  toPosixPath,
+  type ParsedRemoteTarget,
+  type GitRunner,
+  type RemoteSyncOptions,
+  type RemoteSyncResult,
+  type RemoteAddItemType,
+  type RemoteAddItem,
+  type RemoteAddPlan,
+  type RemoteAddOptions,
+  type RemoteAddResult,
+  type LocalGitSource,
+} from "./remote.js";

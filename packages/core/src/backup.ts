@@ -1,5 +1,6 @@
 import { promises as fs } from "node:fs";
 import path from "node:path";
+import { renameWithRetry } from "./fsutil.js";
 import type { Hub } from "./hub.js";
 import { readLinkTarget, removeDirLink } from "./links.js";
 
@@ -18,12 +19,12 @@ export async function moveToBackup(hub: Hub, from: string, label: string, name: 
   const dest = backupPath(hub, label, name, stamp);
   await fs.mkdir(path.dirname(dest), { recursive: true });
   try {
-    await fs.rename(from, dest);
+    await renameWithRetry(from, dest);
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code !== "EXDEV") throw err;
     // Remove the original only after the copy succeeded.
     await fs.cp(from, dest, { recursive: true, errorOnExist: true });
-    await fs.rm(from, { recursive: true });
+    await fs.rm(from, { recursive: true, maxRetries: 10, retryDelay: 50 });
   }
   return dest;
 }

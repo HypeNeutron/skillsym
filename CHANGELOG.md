@@ -7,6 +7,8 @@
 - **Built-in `gemini` agent**: Gemini CLI (`~/.gemini/skills`, `alsoReads: ["~/.agents/skills"]`), detected when `~/.gemini/skills` exists.
 - **Configurable `delivery` and `skillsJsonPath`**: custom agents in `config.json` can set `"delivery": "skills-json"` and `"skillsJsonPath"`.
 - **`skillsym migrate`**: guided migration (with backups) from legacy `config.json` `gemini` overrides, owned junctions in `~/.gemini/config/skills`, and broad `skills.json` entries to built-in `antigravity`.
+- **GitHub & git remotes (`add owner/repo [-s skill]`)**: add or attach skills from `owner/repo[@ref]`, GitHub `/tree/<ref>/<subpath>` URLs, and git URLs into `<hub>/remotes/`, filter skills with `-s`, and keep existing agent assignments when attaching tracking to hub skills.
+- **`skillsym update [skill...] [--dry-run]`**: explicitly fetch and update GitHub-tracked and local-git skills with backups before every overwrite, local-edit conflict detection (`overwrite` / `keep`), `upstream-missing` safety, and automatic `skills-json` refresh (`status` and `check` stay 100% offline).
 
 ## 0.1.0 — 2026-11-02
 

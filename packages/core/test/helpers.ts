@@ -7,7 +7,7 @@ export async function makeTempDir(prefix = "skillsym-test-"): Promise<string> {
 }
 
 export async function removeDir(dir: string): Promise<void> {
-  await fs.rm(dir, { recursive: true, force: true });
+  await fs.rm(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
 }
 
 /** Create a skill folder `<parent>/<name>` with a SKILL.md and any extra files. */

@@ -95,7 +95,7 @@ describe("hub in a cloud-synced folder", () => {
 });
 
 describe("-p / -g", () => {
-  it.each([["add", "x"], ["assign", "x", "-a", "claude"], ["status"], ["sync"], ["import"], ["remove", "x"], ["eject"], ["init", "x"]])(
+  it.each([["add", "x"], ["assign", "x", "-a", "claude"], ["status"], ["sync"], ["update"], ["import"], ["remove", "x"], ["eject"], ["init", "x"]])(
     "%s -p explains that project scope comes in v0.2 and changes nothing",
     async (...args) => {
       expect(await main([...args, "-p"], io())).toBe(2);
@@ -193,6 +193,7 @@ describe("commands that only look", () => {
       ["list"],
       ["config"],
       ["sync", "--dry-run"],
+      ["update", "--dry-run"],
       ["import", "--dry-run"],
       ["eject", "--dry-run"],
       ["migrate", "--dry-run"],

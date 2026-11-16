@@ -1,21 +1,25 @@
 # skillsym
 
-Keep every coding agent's skills in one hub. skillsym links your skills into Claude Code, Codex, Cursor and
-other agents, notices when something drifts, and helps you fix it, without copying files around.
+Keep every coding agent's skills in one hub. skillsym links (or registers via `skills.json`) your skills into Claude
+Code, Codex, Cursor, Gemini CLI, Antigravity and other agents, notices when something drifts, and helps you fix it,
+without copying files around.
 
 ```text
-~/.claude/skills/coding  ──link──┐
-~/.agents/skills/coding  ──link──┼──► ~/.skillsym/skills/coding   (one real copy)
-~/.cursor/skills/…       (Cursor already reads ~/.claude/skills, so no second link)
+~/.claude/skills/coding      ──link──┐
+~/.agents/skills/coding      ──link──┼──► ~/.skillsym/skills/coding   (one real copy)
+~/.gemini/config/skills.json ──inherits──► ~/.skillsym/antigravity-skills.json
+~/.cursor/skills/…           (Cursor already reads ~/.claude/skills, so no second link)
 ```
 
 - **One source of truth.** Edit a skill once; every agent sees the change.
 - **Drift detection.** `skillsym status` tells you when a link was deleted, replaced, or points at nothing, and
   `skillsym sync` repairs what it can and asks about the rest.
-- **Safe by default.** skillsym only touches links it created, backs up before overwriting, and `eject` returns
-  everything to real copies if you stop using it.
-- **Windows without admin rights.** Uses junctions on Windows (no Developer Mode needed) and symlinks on macOS and Linux.
-- **No telemetry, no network calls.**
+- **Safe by default.** skillsym only touches links and manifests it created, backs up before overwriting, and `eject`
+  returns everything to real copies if you stop using it.
+- **Windows without admin rights.** Uses junctions on Windows (no Developer Mode needed), `skills-json` manifests where
+  supported (Antigravity), and symlinks on macOS and Linux.
+- **No telemetry, no background network calls.** `status`, `check` and `sync` stay 100% offline; `git` contacts a
+  remote only when you explicitly pass one to `add` or run `update`.
 
 > Status: **0.1.0**, the command line tool. See the [Roadmap](#roadmap) for what may come next.
 
@@ -63,6 +67,14 @@ Have your own library of skills (a folder or a git repo)?
 ```bash
 npx skillsym add ~/my-skills -a claude          # copy every skill in it; the hub becomes the source of truth
 npx skillsym add ~/my-skills --link -a claude   # or: link to it, so your library stays the source of truth
+```
+
+Installing or updating skills from a GitHub repository?
+
+```bash
+npx skillsym add vercel-labs/skills -s find-skills -a claude,antigravity
+npx skillsym update --dry-run
+npx skillsym update
 ```
 
 Install it globally if you prefer `skillsym` over `npx skillsym`. That also gives you `ssym`, the short name for
@@ -120,7 +132,7 @@ What it offers depends on what you are typing:
 |---|---|
 | A command | Every command, including `ls` and `rm` |
 | `--` after a command | The options that command accepts |
-| A skill for `open`, `assign`, `remove`, `eject`, `sync` | Skills in the hub, leaving out names already on the line |
+| A skill for `open`, `assign`, `remove`, `eject`, `sync`, `update` | Skills in the hub, leaving out names already on the line |
 | A skill for `status`, `check` | Skills in the hub and unmanaged skills |
 | A skill for `import` | Skills that can be imported, not those in the hub |
 | After `-a` | Agents, including your own from `config.json` |
@@ -188,14 +200,16 @@ from, so skillsym does not give it a second copy of a skill it already sees. Set
 |---|---|
 | `skillsym init [name]` | Create a `SKILL.md` template in `./<name>` (or here, named after this folder). |
 | `skillsym add <path> [-a agents]` | Copy one skill folder into the hub and optionally assign it. |
+| `skillsym add <owner/repo> [-s skill] [-a agents] [--dry-run]` | Clone or fetch a GitHub/git repo into `<hub>/remotes/` and copy its skills (or only `-s <skill>`) into the hub; attaches tracking if a skill already exists there. |
 | `skillsym add <library> [-a agents] [--dry-run]` | A folder of skills: copy every skill in it (any depth; `.git` and `node_modules` are skipped). The library is not changed. |
 | `skillsym add <library> --link [-a agents]` | Link the hub to your library instead of copying it. Run it again to pick up new skills, or to point at the library's new location after you move it. |
 | `skillsym assign <skill...> -a <agents>` | Link hub skills into agents' folders. |
-| `skillsym list [-a agents]` / `ls` | List hub skills, their agents, and where linked skills come from. |
+| `skillsym list [-a agents]` / `ls` | List hub skills, their agents, and where linked/remote skills come from. |
 | `skillsym open <skill>` | Print a skill's folder and open it in `$EDITOR`, or your file manager. A `--link` skill opens in your library. |
 | `skillsym status [skill...] [-a agents] [--only states] [--all]` | Show links by status: what needs attention, unmanaged skills, news from linked libraries, and a count. `--all` also lists links that are fine; `--only` and names narrow it. |
 | `skillsym check` | Same as `status`, but exits 1 if anything is not in sync (for CI and scripts). |
 | `skillsym sync [skill...] [-a agents] [--dry-run]` | Repair drift, optionally only for those skills or agents. Fixes what it can decide alone and asks about the rest. |
+| `skillsym update [skill...] [--dry-run]` | Fetch and update GitHub-tracked and git-backed skills in the hub (backs up existing copies, asks before overwriting local edits, and keeps skills removed upstream). |
 | `skillsym import [--dry-run]` | Move skills found in agents' folders into the hub. |
 | `skillsym import <skill...> [-a agents]` / `import -a <agents>` | Only those skills, or only copies in those agents' folders. Other agents' copies are not compared or touched. |
 | `skillsym import --continue` / `--abort` | Finish or drop an open merge. |
@@ -216,8 +230,8 @@ Options:
 | Option | Meaning |
 |---|---|
 | `-a, --agent <ids>` | Agent ids, comma-separated or repeated; `'*'` = every installed agent. |
-| `-s, --skill <name>` | Skill names (instead of positional names); `'*'` = every skill in the hub. |
-| `--all` | `assign`: every skill, to every installed agent unless `-a` names some. `add`: every installed agent. `remove`: every skill. `status`, `check`: list every link. |
+| `-s, --skill <name>` | Skill names (instead of positional names, or to filter `add`); `'*'` = every skill in the hub. |
+| `--all` | `assign`: every skill, to every installed agent unless `-a` names some. `add`: every installed agent. `remove`, `update`: every skill. `status`, `check`: list every link. |
 | `-dr, --dry-run` | Show what would change; change nothing. |
 | `--only <states>` | `status`, `check`: only these statuses, comma-separated (see [Status at a glance](#status-at-a-glance)). |
 | `--link` | With `add`: link to your library instead of copying it. |
@@ -228,8 +242,8 @@ Options:
 | `-h, --help` | Show the commands and options. |
 | `-v, --version` | Show the version. |
 
-`assign`, `remove`, `eject` and `import` also take name patterns, where `*` means any characters and `?` one. Keep
-the quotes: without them, bash and zsh replace `*` with the names of the files in the current folder.
+`add -s`, `assign`, `update`, `remove`, `eject` and `import` also take name patterns, where `*` means any characters and `?`
+one. Keep the quotes: without them, bash and zsh replace `*` with the names of the files in the current folder.
 
 ```bash
 npx skillsym assign 'gcp-*' -a claude
@@ -268,7 +282,7 @@ npx skillsym sync -a codex
 
 ## Answering questions
 
-When `sync` or `import` needs a decision, it asks one question at a time:
+When `sync`, `update` or `import` needs a decision, it asks one question at a time:
 
 - **Enter** skips that one, **q** skips all the rest, **Ctrl+C** cancels without applying any answer.
 - Without a terminal (or with `-y`) nothing is asked: conflicts are reported and left alone.
@@ -322,10 +336,42 @@ lose it with this computer.
 With `--link`, if you resolve a conflict by adopting an agent's version, or pick an agent's copy during import,
 skillsym writes it **into your library** after backing up the library's version, so you can review it with `git diff`.
 
+## GitHub and git skills
+
+Add individual skills or whole skill repositories from GitHub (`owner/repo`, `owner/repo@ref`, or a `/tree/<ref>/<subpath>`
+URL) or any git URL. skillsym caches clones under `~/.skillsym/remotes/` and copies the chosen skills into
+`~/.skillsym/skills/` by default (pass `--link` to link into the remote cache instead):
+
+```bash
+skillsym add vercel-labs/skills -s find-skills -a claude,antigravity
+skillsym add https://github.com/owner/repo/tree/main/skills/my-skill
+```
+
+- **Attach to existing hub skills:** running `skillsym add <repo> -s <skill>` when `<skill>` is already in your hub
+  attaches upstream tracking without wiping its agent assignments.
+- **Explicit updates only:** `skillsym status` and `skillsym check` stay offline; run `skillsym update --dry-run` to
+  check upstream and `skillsym update` to apply updates. Every updated skill is backed up to `~/.skillsym/backups/` first.
+- **Local-edit safety:** if you edited a skill in `~/.skillsym/skills/` since it was synced, `skillsym update` never
+  silently overwrites your changes — it asks whether to **overwrite** (backing up your edits first) or **keep** (`-y` and
+  non-interactive runs keep your edits and exit `1`). Skills removed upstream are reported as missing upstream without
+  deleting your local copy.
+- **Local git folders:** skills added from a local git repository are also updated by `skillsym update`.
+
+## Antigravity and `skills-json` delivery
+
+Built-in `antigravity` uses `skills-json` delivery instead of folder junctions:
+
+- Assigning or removing skills updates `<hub>/antigravity-skills.json` grouped by source folder (`include_only`) and
+  maintains a single `inherits` entry in `~/.gemini/config/skills.json`, keeping your custom `entries` untouched.
+- Both hub skills (`~/.skillsym/skills`) and `--link` library skills load directly from their real folders.
+- Running `skillsym eject -a antigravity` removes the `inherits` reference and copies real skill folders into
+  `~/.gemini/config/skills`.
+- If you previously configured `gemini` at `~/.gemini/config/skills` or added broad folder entries to `skills.json`, run
+  `skillsym migrate --dry-run` and `skillsym migrate` (or confirm during `skillsym sync`) to switch safely with backups.
+
 ## Using it with `npx skills`
 
-[`npx skills`](https://github.com/vercel-labs/skills) installs skills from the internet; skillsym manages the
-skills you already have. They work side by side:
+[`npx skills`](https://github.com/vercel-labs/skills) and skillsym work side by side:
 
 - skillsym never touches what `npx skills` created — its copies in `~/.agents/skills`, its links, or its lock file.
   They show up as `unmanaged`, and `import` skips folders another tool links to.
@@ -366,7 +412,9 @@ after `remove` it no longer has the skill.
 
 ## Privacy
 
-skillsym makes no network calls and collects no telemetry. Everything stays on your machine.
+skillsym collects no telemetry and makes no background network calls. `status`, `check`, `sync`, `import`, `remove`,
+`eject` and `list` stay completely on your machine; `git` contacts a remote only when you explicitly run
+`skillsym add <repo>` or `skillsym update`.
 
 ## Roadmap
 
@@ -376,7 +424,6 @@ The ideas so far:
 - Real copies for agents that neither read links nor support `skills.json`, kept up to date by `sync` (`antigravity` already uses `skills-json` delivery).
 - Project-level skills (`-p`).
 - Groups of skills, and choosing skills with the arrow keys.
-- Opt-in updates for skills and `--link` libraries backed by GitHub repositories.
 - A background watcher that notices drift as it happens.
 
 Teams: if you want to share a skill library across a team, see drift across everyone's machines, or roll out a new

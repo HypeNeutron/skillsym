@@ -8,6 +8,8 @@
     "claude-code",
     "codex",
     "cursor",
+    "antigravity",
+    "gemini-cli",
     "symlink"
   ],
   "license": "MIT",

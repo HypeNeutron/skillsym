@@ -9,6 +9,8 @@ export interface Hub {
   home: string;
   /** Where the real skill folders live; agent folders link here. */
   skillsDir: string;
+  /** Managed git checkouts for skills installed from remote repositories. */
+  remotesDir: string;
   backupsDir: string;
   /** Scratch space for staging copies before they are renamed into place. */
   tmpDir: string;
@@ -38,6 +40,7 @@ export function hubPaths(home: string): Hub {
   return {
     home,
     skillsDir: path.join(home, "skills"),
+    remotesDir: path.join(home, "remotes"),
     backupsDir: path.join(home, "backups"),
     tmpDir: path.join(home, ".tmp"),
     manifestPath: path.join(home, "manifest.json"),

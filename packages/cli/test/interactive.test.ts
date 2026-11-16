@@ -1,6 +1,8 @@
 import { promises as fs } from "node:fs";
 import path from "node:path";
+import { pathToFileURL } from "node:url";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { runGit } from "@skillsym/core";
 import { makeSkill, makeTempDir, removeDir } from "../../core/test/helpers.js";
 // The built CLI module, driven in-process so answers can be scripted.
 import { main, PromptCancelled, type Io } from "../dist/main.js";
@@ -258,5 +260,32 @@ describe("sync asks about conflicts in a terminal", () => {
     expect(await main(["sync"], io(["1"]))).toBe(0);
     expect(JSON.parse(await fs.readFile(path.join(hubHome, "config.json"), "utf8")).agents).toEqual([]);
     expect(JSON.parse(await fs.readFile(path.join(userHome, ".gemini", "config", "skills.json"), "utf8")).inherits).toHaveLength(1);
+  });
+});
+
+describe("update asks before overwriting locally edited skills", () => {
+  it("keeps local edits on Enter/k and backs up + overwrites on o", async () => {
+    const repo = path.join(root, "repo");
+    await fs.mkdir(repo, { recursive: true });
+    await runGit(["init", "-b", "main"], repo);
+    await runGit(["config", "user.email", "test@skillsym.dev"], repo);
+    await runGit(["config", "user.name", "Test"], repo);
+    await makeSkill(repo, "alpha", { "body.md": "v1\n" });
+    await runGit(["add", "."], repo);
+    await runGit(["commit", "-m", "v1"], repo);
+
+    await main(["add", pathToFileURL(repo).toString()], io());
+    const hubHome = path.join(root, "hub");
+    await fs.writeFile(path.join(hubHome, "skills", "alpha", "body.md"), "local edit\n");
+    await fs.writeFile(path.join(repo, "alpha", "body.md"), "v2\n");
+    await runGit(["add", "."], repo);
+    await runGit(["commit", "-m", "v2"], repo);
+
+    expect(await main(["update"], io([""]))).toBe(1);
+    expect(await fs.readFile(path.join(hubHome, "skills", "alpha", "body.md"), "utf8")).toBe("local edit\n");
+
+    expect(await main(["update"], io(["o"]))).toBe(0);
+    expect(out.join("\n")).toContain("overwrote");
+    expect(await fs.readFile(path.join(hubHome, "skills", "alpha", "body.md"), "utf8")).toBe("v2\n");
   });
 });

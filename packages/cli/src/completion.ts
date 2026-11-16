@@ -68,6 +68,7 @@ export async function complete(current: string, before: string[], source: Comple
     case "remove":
     case "eject":
     case "sync":
+    case "update":
       return unused(await source.skills());
     case "status":
     case "check":

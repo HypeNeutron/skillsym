@@ -37,6 +37,17 @@ import {
   planLibraryAdd,
   addLibrary,
   type LibraryItem,
+  parseRemoteTarget,
+  planRemoteAdd,
+  addRemoteSkills,
+  planUpdate,
+  updateSkills,
+  resolveUpdateConflicts,
+  type ParsedRemoteTarget,
+  type RemoteAddItem,
+  type UpdateDecision,
+  type UpdateItem,
+  type UpdateResolution,
   resolveConflicts,
   scanStatus,
   type UnlinkResult,
@@ -110,10 +121,9 @@ const USAGE = `Usage: skillsym <command> [options]   (ssym is the short name, on
 
 Commands:
   init [name]                   Create a SKILL.md template (in ./<name>, or here without a name)
-  add <path> [-a <agents>]      Copy a skill folder (with SKILL.md) into the hub, optionally assign it.
-                                A folder of skills (your own library) adds every skill in it; the library
-                                is left untouched (--dry-run to preview). With --link the hub links to the
-                                library instead of copying it, so the library stays the source of truth
+  add <path|repo> [-a <agents>] Copy a skill folder, library, or GitHub/git repo into the hub, optionally assign it.
+                                A folder of skills or GitHub repo adds every skill in it (or only -s <skill>); local
+                                libraries stay untouched (--dry-run to preview). With --link the hub links to the source
   assign <skill...> -a <agents> Link hub skills into agents' skills folders
   list, ls [-a <agents>]        List skills in the hub and their agents (with -a, only those agents' skills)
   open <skill>                  Print a skill's folder and open it in your editor (a --link skill: in your library)
@@ -127,6 +137,8 @@ Commands:
                                 Make the agents' folders match the manifest (with names or -a, only those);
                                 asks about conflicts
                                 (without a terminal, or with -y, conflicts are only reported)
+  update [skill...] [--dry-run] Fetch and update GitHub/git-tracked skills in the hub (backs up cleanly, asks
+                                before overwriting local edits)
   import [skill...] [-a <agents>] [--dry-run]
                                 Bring skills already in agents' folders into the hub (originals backed up,
                                 replaced by links); copies that differ: choose one, keep both, or merge.
@@ -176,13 +188,14 @@ class MissingSkillName extends UsageError {}
 export const COMMAND_OPTIONS: Record<string, string[]> = {
   init: [],
   // These never ask, but -y is a common habit and harmless.
-  add: ["agent", "all", "dry-run", "link", "yes"],
+  add: ["agent", "skill", "all", "dry-run", "link", "yes"],
   assign: ["agent", "skill", "all", "yes"],
   list: ["agent"],
   ls: ["agent"],
   status: ["all", "agent", "skill", "only"],
   check: ["all", "agent", "skill", "only"],
   sync: ["agent", "skill", "dry-run", "yes"],
+  update: ["skill", "all", "dry-run", "yes"],
   import: ["agent", "skill", "dry-run", "yes", "continue", "abort"],
   remove: ["agent", "skill", "all", "dry-run", "yes"],
   rm: ["agent", "skill", "all", "dry-run", "yes"],
@@ -388,7 +401,7 @@ async function run(argv: string[], io: Io, json: boolean): Promise<ExitCode> {
     return 0;
   }
 
-  const writes = (["add", "assign", "sync", "remove", "rm", "import", "eject", "migrate"].includes(command) && !values["dry-run"]) || (command === "config" && rest.length > 0) || ((command === "lib" || command === "library") && ["unlink", "rm", "remove"].includes(rest[0] ?? "") && !values["dry-run"]);
+  const writes = (["add", "assign", "sync", "update", "remove", "rm", "import", "eject", "migrate"].includes(command) && !values["dry-run"]) || (command === "config" && rest.length > 0) || ((command === "lib" || command === "library") && ["unlink", "rm", "remove"].includes(rest[0] ?? "") && !values["dry-run"]);
   // Only commands that change something create the hub; status, list and --dry-run leave the disk alone.
   const home = resolveHubHome({ env: io.env });
   const hub = writes ? await openHub(home) : hubPaths(home);
@@ -405,13 +418,23 @@ async function run(argv: string[], io: Io, json: boolean): Promise<ExitCode> {
   }
   switch (command) {
     case "add": {
-      if (rest.length !== 1) throw new UsageError("add takes exactly one path: skillsym add <path> [-a <agents>]");
-      const target = path.resolve(io.cwd ?? process.cwd(), rest[0]!);
+      if (rest.length !== 1) throw new UsageError("add takes one path or GitHub repo: skillsym add <path|owner/repo> [-a <agents>]");
+      const rawTarget = rest[0]!;
+      const cwd = io.cwd ?? process.cwd();
+      const remoteTarget = await parseRemoteTarget(rawTarget, cwd);
+      if (remoteTarget) {
+        return addFromRemote(hub, remoteTarget, values.skill ?? [], agents, profiles, io, json, Boolean(values["dry-run"]), Boolean(values.link));
+      }
+      const target = path.resolve(cwd, rawTarget);
       // A folder without its own SKILL.md is a library: add every skill found in it.
       if ((await isDirectory(target)) && (values.link || !(await isFile(path.join(target, "SKILL.md"))))) {
-        return addFromLibrary(hub, target, agents, profiles, io, json, Boolean(values["dry-run"]), Boolean(values.link));
+        return addFromLibrary(hub, target, values.skill ?? [], agents, profiles, io, json, Boolean(values["dry-run"]), Boolean(values.link));
       }
-      if (values["dry-run"]) throw new UsageError("--dry-run with add is for libraries (a folder of skills); adding one skill changes only the hub");
+      if (values["dry-run"]) throw new UsageError("--dry-run with add is for repositories or libraries; adding one local skill changes only the hub");
+      if (values.skill?.length) {
+        // Validate explicit `-s` when pointing directly at a single skill directory.
+        await planLibraryAdd(hub, target, { skills: values.skill });
+      }
       const skill = await addSkill(hub, target);
       if (!agents.length) {
         if (json) io.stdout(JSON.stringify({ added: skill }));
@@ -503,6 +526,36 @@ async function run(argv: string[], io: Io, json: boolean): Promise<ExitCode> {
       if (resolutions.some((r) => r.choice === "skip")) io.stdout("\nSkipped conflicts are unchanged. Run `skillsym sync` again whenever you want to decide them.");
       if (failed || resolutions.some((r) => !r.ok)) return 2;
       return resolutions.some((r) => r.choice === "skip") ? 1 : 0;
+    }
+    case "update": {
+      if (agents.length && values.agent?.length) throw new UsageError("update does not take -a; agent links already point to the hub");
+      const skills = values.all ? [] : [...rest, ...(values.skill ?? [])];
+      const choice = { profiles, ...(skills.length ? { skills } : {}) };
+      const canAsk = Boolean(io.interactive && io.ask && !json && !values.yes);
+      if (values["dry-run"]) {
+        const plan = await planUpdate(hub, choice);
+        if (json) io.stdout(JSON.stringify({ dryRun: true, ...plan }));
+        else io.stdout(formatUpdates(plan.items, true, Boolean(skills.length), false));
+        return plan.items.some((i) => i.status === "conflict" || i.status === "upstream-missing") ? 1 : 0;
+      }
+      const result = await updateSkills(hub, choice);
+      const conflicts = result.items.filter((i) => i.status === "conflict");
+      const missingUpstream = result.items.some((i) => i.status === "upstream-missing");
+      if (!json && result.snapshotFailed.length) io.stderr(`warning: could not update the library snapshot of ${result.snapshotFailed.join(", ")}.`);
+      if (json) io.stdout(JSON.stringify({ dryRun: false, ...result }));
+      else if (result.items.some((i) => i.status !== "conflict") || !conflicts.length || !canAsk) {
+        io.stdout(formatUpdates(canAsk ? result.items.filter((i) => i.status !== "conflict") : result.items, false, Boolean(skills.length), !canAsk));
+      }
+      if (!conflicts.length || !canAsk) return conflicts.length || missingUpstream ? 1 : 0;
+
+      const decisions = await askUpdateDecisions(conflicts, io);
+      const resolutions = await resolveUpdateConflicts(hub, decisions, choice);
+      io.stdout(formatUpdateResolutions(resolutions));
+      if (resolutions.some((r) => r.choice === "keep")) {
+        io.stdout("\nKept local edits unchanged. Run `skillsym update` again whenever you want to overwrite or recheck.");
+      }
+      if (resolutions.some((r) => !r.ok)) return 2;
+      return resolutions.some((r) => r.choice === "keep") || missingUpstream ? 1 : 0;
     }
     case "import": {
       const skills = [...rest, ...(values.skill ?? [])];
@@ -757,6 +810,7 @@ async function run(argv: string[], io: Io, json: boolean): Promise<ExitCode> {
 async function addFromLibrary(
   hub: Hub,
   library: string,
+  skills: string[],
   agents: string[],
   profiles: AgentProfile[],
   io: Io,
@@ -778,12 +832,12 @@ async function addFromLibrary(
     );
   }
   if (dryRun) {
-    const plan = await planLibraryAdd(hub, library, { link });
+    const plan = await planLibraryAdd(hub, library, { link, ...(skills.length ? { skills } : {}) });
     if (json) io.stdout(JSON.stringify({ dryRun: true, ...plan }));
     else io.stdout(formatLibrary(plan.items, library, true, link));
     return plan.items.some((i) => i.type === "skip") ? 1 : 0;
   }
-  const result = await addLibrary(hub, library, { link, profiles });
+  const result = await addLibrary(hub, library, { link, profiles, ...(skills.length ? { skills } : {}) });
   // -a applies to every skill now linked from the library, including ones already linked earlier.
   const names = result.items.filter((i) => i.type !== "skip").map((i) => i.name);
   const assigned = agents.length && names.length ? (await assignSkills(hub, { skills: names, agents, profiles })).results : [];
@@ -811,6 +865,153 @@ async function addFromLibrary(
   }
   if (assigned.some((r) => r.outcome === "failed")) return 2;
   return result.items.some((i) => i.type === "skip") || assigned.some((r) => r.outcome === "blocked") ? 1 : 0;
+}
+
+/** `add <owner/repo|url>`: sync cached remote clone, copy or link skills into hub, and optionally assign them. */
+async function addFromRemote(
+  hub: Hub,
+  target: ParsedRemoteTarget,
+  skills: string[],
+  agents: string[],
+  profiles: AgentProfile[],
+  io: Io,
+  json: boolean,
+  dryRun: boolean,
+  link: boolean,
+): Promise<ExitCode> {
+  if (dryRun) {
+    const plan = await planRemoteAdd(hub, target, { link, ...(skills.length ? { skills } : {}) });
+    if (json) io.stdout(JSON.stringify({ dryRun: true, ...plan }));
+    else io.stdout(formatRemoteAdd(plan.items, target.label, plan.commit, true, link));
+    return plan.items.some((i) => i.type === "skip" || i.type === "conflict") ? 1 : 0;
+  }
+  const result = await addRemoteSkills(hub, target, { link, profiles, ...(skills.length ? { skills } : {}) });
+  const assignable = result.items.filter((i) => i.type !== "skip" && i.type !== "conflict").map((i) => i.name);
+  const assigned = agents.length && assignable.length ? (await assignSkills(hub, { skills: assignable, agents, profiles })).results : [];
+  if (json) io.stdout(JSON.stringify({ dryRun: false, ...result, assigned }));
+  else {
+    if (result.snapshotFailed.length) io.stderr(`warning: could not update the library snapshot of ${result.snapshotFailed.join(", ")}.`);
+    io.stdout(formatRemoteAdd(result.items, target.label, result.commit, false, link));
+    if (assigned.length) io.stdout(formatLinks(assigned));
+    if (!agents.length && result.added.length) {
+      io.stdout("\nAssign them to agents with: skillsym assign <skill...> -a <agents>");
+    }
+  }
+  if (assigned.some((r) => r.outcome === "failed")) return 2;
+  return result.items.some((i) => i.type === "skip" || i.type === "conflict") || assigned.some((r) => r.outcome === "blocked") ? 1 : 0;
+}
+
+function formatRemoteAdd(items: RemoteAddItem[], label: string, commit: string, dryRun: boolean, link: boolean): string {
+  const shortCommit = commit.slice(0, 7);
+  const lines: string[] = [];
+  const width = Math.max(1, ...items.map((i) => i.name.length));
+  const groups: [RemoteAddItem["type"], string][] = [
+    ["add", `${dryRun ? "Would add" : "Added"} from ${label} (${shortCommit}, ${link ? "linked to remote cache" : "copied into hub"}):`],
+    ["adopt-remote", `${dryRun ? "Would attach" : "Attached"} remote tracking to existing hub skill(s):`],
+    ["update", `${dryRun ? "Would update" : "Updated"} from ${label} (${shortCommit}):`],
+  ];
+  for (const [kind, heading] of groups) {
+    const matched = items.filter((i) => i.type === kind);
+    if (!matched.length) continue;
+    lines.push(heading);
+    for (const i of matched) {
+      const extra = i.attachedAgents?.length ? `  (kept agents: ${i.attachedAgents.join(", ")})` : "";
+      lines.push(`  ${i.name.padEnd(width)}  ${i.subpath || "."}${extra}`);
+      if (i.backup) lines.push(`  ${"".padEnd(width)}  backup: ${i.backup}`);
+    }
+  }
+  const unchanged = items.filter((i) => i.type === "unchanged");
+  if (unchanged.length) lines.push(`Already up to date from ${label} (${shortCommit}): ${unchanged.map((i) => i.name).join(", ")}`);
+  const conflicts = items.filter((i) => i.type === "conflict");
+  if (conflicts.length) {
+    lines.push(`Conflicts (local edits kept; run \`skillsym update\` to decide):`);
+    for (const i of conflicts) lines.push(`  ${i.name.padEnd(width)}  ${i.reason}`);
+  }
+  const skipped = items.filter((i) => i.type === "skip");
+  if (skipped.length) {
+    lines.push(`Skipped ${skipped.length}:`);
+    for (const i of skipped) lines.push(`  ${i.name.padEnd(width)}  ${i.reason}`);
+  }
+  if (dryRun) lines.push("", "Nothing was changed. Run the same command without --dry-run to apply.");
+  return lines.join("\n");
+}
+
+function formatUpdates(items: UpdateItem[], dryRun: boolean, explicitSkills: boolean, reportConflicts: boolean): string {
+  if (!items.length) return "Nothing in the hub to update.";
+  const lines: string[] = [];
+  const updated = items.filter((i) => i.status === "updated");
+  const upToDate = items.filter((i) => i.status === "up-to-date");
+  const missing = items.filter((i) => i.status === "upstream-missing");
+  const conflicts = items.filter((i) => i.status === "conflict");
+  const localOnly = items.filter((i) => i.status === "local-only");
+  const width = Math.max(1, ...items.map((i) => i.skill.length));
+
+  if (updated.length) {
+    for (const u of updated) {
+      const revs = u.oldCommit && u.newCommit ? ` (${u.oldCommit.slice(0, 7)} -> ${u.newCommit.slice(0, 7)})` : "";
+      lines.push(`${dryRun ? "would update" : "updated     "}  ${u.skill.padEnd(width)}${revs}`);
+      if (u.backup) lines.push(`              backup: ${u.backup}`);
+    }
+  }
+  if (missing.length) {
+    for (const m of missing) lines.push(`UPSTREAM MISSING  ${m.skill.padEnd(width)}  ${m.reason ?? "missing upstream (hub copy kept)"}`);
+  }
+  if (conflicts.length) {
+    for (const c of conflicts) lines.push(`CONFLICT  ${c.skill.padEnd(width)}  ${c.reason ?? "modified locally and upstream"}`);
+  }
+  if (explicitSkills && localOnly.length) {
+    for (const l of localOnly) lines.push(`local-only  ${l.skill.padEnd(width)}  ${l.reason ?? "not git-tracked"}`);
+  }
+  if (upToDate.length) {
+    if (!updated.length && !missing.length && !conflicts.length && !(explicitSkills && localOnly.length)) {
+      lines.push(`Everything tracked (${upToDate.length}) is up to date.`);
+    } else {
+      lines.push(`Up to date: ${upToDate.map((u) => u.skill).join(", ")}`);
+    }
+  }
+  if (!explicitSkills && localOnly.length && !updated.length && !upToDate.length && !missing.length && !conflicts.length) {
+    lines.push(`Checked ${localOnly.length} skill(s): none are linked to GitHub or a git source.`);
+  } else if (!explicitSkills && localOnly.length) {
+    lines.push(`${localOnly.length} local skill(s) skipped (not git-tracked).`);
+  }
+  if (dryRun) {
+    if (conflicts.length) lines.push("", `${conflicts.length} conflict(s) would ask whether to overwrite (with backup) or keep local edits.`);
+    lines.push("", "Nothing was changed in your hub skills. Run `skillsym update` to apply.");
+  } else if (reportConflicts && conflicts.length) {
+    lines.push("", `${conflicts.length} conflict(s) left untouched. Run \`skillsym update\` in a terminal (without -y) to overwrite or keep.`);
+  }
+  return lines.join("\n").trimStart();
+}
+
+async function askUpdateDecisions(conflicts: UpdateItem[], io: Io): Promise<UpdateDecision[]> {
+  const decisions: UpdateDecision[] = [];
+  let quit = false;
+  for (const item of conflicts) {
+    if (quit) {
+      decisions.push({ skill: item.skill, choice: "keep" });
+      continue;
+    }
+    io.stdout(`\n${item.skill}: ${item.reason ?? "modified locally and upstream"}`);
+    io.stdout("  [o] overwrite  replace the hub copy with upstream (local hub copy is backed up first)");
+    io.stdout("  [k] keep       leave local hub edits untouched");
+    const answer = await askOne(io, ["overwrite", "keep"]);
+    if (answer === "quit") {
+      quit = true;
+      decisions.push({ skill: item.skill, choice: "keep" });
+      continue;
+    }
+    decisions.push({ skill: item.skill, choice: answer });
+  }
+  return decisions;
+}
+
+function formatUpdateResolutions(results: UpdateResolution[]): string {
+  const lines = results.map((r) => {
+    if (!r.ok) return `FAILED     ${r.choice} ${r.skill}: ${r.error}`;
+    if (r.choice === "keep") return `kept       ${r.skill}`;
+    return `overwrote  ${r.skill}${r.backup ? `\n           backup: ${r.backup}` : ""}`;
+  });
+  return ["", ...lines].join("\n");
 }
 
 function formatLibrary(items: LibraryItem[], library: string, dryRun: boolean, link = false): string {
@@ -1102,16 +1303,23 @@ function formatList(skills: SkillInfo[], indent = "", libraries: string[] = []):
   const agentsOf = (s: SkillInfo) => (s.agents.length ? s.agents.join(", ") : "(not assigned)");
   const width = Math.max(...skills.map((s) => s.name.length));
   const agentWidth = Math.max(...skills.map((s) => agentsOf(s).length));
-  // One path per library, said once; each linked skill points at it.
-  const sources: string[] = [];
+  // One note per library or remote source, said once; each tracked skill points at it.
+  const notes: string[] = [];
   const mark = (s: SkillInfo) => {
-    if (s.mode !== "source-link" || !s.source) return "";
-    const from = libraries.find((l) => !path.relative(l, s.source!).startsWith("..")) ?? path.dirname(s.source);
-    if (!sources.includes(from)) sources.push(from);
-    return `[${sources.indexOf(from) + 1}]`;
+    let note: string | undefined;
+    if (s.mode === "source-link" && s.source) {
+      const from = libraries.find((l) => !path.relative(l, s.source!).startsWith("..")) ?? path.dirname(s.source);
+      note = `linked from ${from}`;
+    } else if (s.remote) {
+      const repo = s.remote.url.replace(/\.git$/i, "");
+      note = `from ${repo}${s.remote.ref ? `@${s.remote.ref}` : ""}`;
+    }
+    if (!note) return "";
+    if (!notes.includes(note)) notes.push(note);
+    return `[${notes.indexOf(note) + 1}]`;
   };
   const lines = skills.map((s) => `${indent}${s.name.padEnd(width)}  ${agentsOf(s).padEnd(agentWidth)}  ${mark(s)}`.trimEnd());
-  if (sources.length) lines.push("", ...sources.map((from, i) => `${indent}[${i + 1}] linked from ${from}`));
+  if (notes.length) lines.push("", ...notes.map((note, i) => `${indent}[${i + 1}] ${note}`));
   return lines.join("\n");
 }
 
@@ -1414,6 +1622,9 @@ const NEXT_STEP: Record<string, string> = {
   INVALID_SKILL_NAME: "Use only letters, digits, \".\", \"_\" and \"-\", starting with a letter or digit.",
   MANIFEST_CORRUPT: "Restore manifest.json from a backup, or fix the JSON by hand; skillsym will not overwrite it.",
   STATE_CORRUPT: "Fix state.json by hand, or delete it and run `skillsym sync` to rebuild it from the links on disk.",
+  SKILLS_JSON_INVALID: "Fix the agent's skills.json syntax (or back it up and replace with `{\"entries\": []}`).",
+  REMOTE_INVALID: "Use `owner/repo[@ref]`, `https://github.com/owner/repo/tree/<ref>/<subpath>`, or a valid git URL.",
+  REMOTE_FETCH_FAILED: "Check the repository URL, ref name, git installation, and network/SSH credentials.",
 };
 
 function report(err: unknown, io: Io, json: boolean): ExitCode {

@@ -1,12 +1,13 @@
 import { randomBytes } from "node:crypto";
 import { promises as fs } from "node:fs";
 import path from "node:path";
+import { moveToBackup } from "./backup.js";
 import { SkillsymError } from "./errors.js";
-import { isDirectory, isFile, pathExists } from "./fsutil.js";
+import { isDirectory, isFile, pathExists, renameWithRetry } from "./fsutil.js";
 import { hashSkillDir } from "./hash.js";
 import type { Hub } from "./hub.js";
 import { withLock, type LockOptions } from "./lock.js";
-import { readManifest, writeManifest, type SkillMode, type SkillScope } from "./manifest.js";
+import { readManifest, writeManifest, type RemoteSkillInfo, type SkillMode, type SkillScope } from "./manifest.js";
 
 export interface SkillInfo {
   name: string;
@@ -17,6 +18,8 @@ export interface SkillInfo {
   scope: SkillScope;
   /** Where the skill came from; for a --link skill, the library folder it links to. */
   source?: string;
+  /** Upstream git provenance when installed from or attached to GitHub/git. */
+  remote?: RemoteSkillInfo;
 }
 
 export interface AddSkillOptions {
@@ -112,6 +115,39 @@ export async function copyIntoHub(hub: Hub, name: string, source: string): Promi
   return { name, path: dest, agents: [], mode: "link", scope: "user" };
 }
 
+/**
+ * Atomically replace `<hub>/skills/<name>` with the contents of `source`, moving any existing hub
+ * copy into `<hub>/backups/<stamp>/<backupLabel>/<name>` first and restoring it on rename failure.
+ */
+export async function replaceHubSkillFromSource(
+  hub: Hub,
+  name: string,
+  source: string,
+  backupLabel: string,
+  stamp?: string,
+): Promise<string | undefined> {
+  const dest = path.join(hub.skillsDir, name);
+  await fs.mkdir(hub.skillsDir, { recursive: true });
+  await fs.mkdir(hub.tmpDir, { recursive: true });
+  const staging = path.join(hub.tmpDir, `${name}.${randomBytes(6).toString("hex")}`);
+  await fs.cp(source, staging, { recursive: true, errorOnExist: true, force: false });
+
+  let backup: string | undefined;
+  if (await pathExists(dest)) {
+    backup = await moveToBackup(hub, dest, backupLabel, name, stamp);
+  }
+  try {
+    await renameWithRetry(staging, dest);
+  } catch (err) {
+    await fs.rm(staging, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }).catch(() => {});
+    if (backup && !(await pathExists(dest))) {
+      await renameWithRetry(backup, dest).catch(() => {});
+    }
+    throw err;
+  }
+  return backup;
+}
+
 export async function listSkills(hub: Hub): Promise<SkillInfo[]> {
   const manifest = await readManifest(hub.manifestPath);
   return Object.keys(manifest.skills)
@@ -125,6 +161,7 @@ export async function listSkills(hub: Hub): Promise<SkillInfo[]> {
         mode: entry.mode,
         scope: entry.scope,
         ...(entry.source ? { source: entry.source } : {}),
+        ...(entry.remote ? { remote: { ...entry.remote } } : {}),
       };
     });
 }

@@ -12,6 +12,17 @@ export const MANIFEST_VERSION = 1;
 export type SkillMode = "link" | "copy" | "source-link";
 export type SkillScope = "user" | "project";
 
+export interface RemoteSkillInfo {
+  /** Repository clone URL (e.g. https://github.com/owner/repo.git). */
+  url: string;
+  /** Optional branch, tag, or commit ref the user requested. */
+  ref?: string;
+  /** POSIX path to the skill folder inside the repo ("" or "." if repo root). */
+  subpath: string;
+  /** Last synced git commit SHA. */
+  commit: string;
+}
+
 export interface ManifestSkill {
   /** Agent ids this skill is assigned to. */
   agents: string[];
@@ -22,6 +33,8 @@ export interface ManifestSkill {
   source?: string;
   /** Content hash of the skill at `source` when it was added. */
   sourceHash?: string;
+  /** Upstream git repository coordinates when added/attached from GitHub or git. */
+  remote?: RemoteSkillInfo;
 }
 
 /** The user's desired state. */
@@ -81,12 +94,27 @@ export async function readManifest(file: string): Promise<Manifest> {
     if (!isObject(entry) || !Array.isArray(entry.agents)) {
       throw new SkillsymError("MANIFEST_CORRUPT", `Manifest entry for "${name}" is malformed: ${file}`, { file, skill: name });
     }
+    let remote: RemoteSkillInfo | undefined;
+    if (isObject(entry.remote)) {
+      if (typeof entry.remote.url !== "string" || typeof entry.remote.subpath !== "string" || typeof entry.remote.commit !== "string") {
+        throw new SkillsymError("MANIFEST_CORRUPT", `Manifest remote entry for "${name}" is malformed: ${file}`, { file, skill: name });
+      }
+      remote = {
+        url: entry.remote.url,
+        ...(typeof entry.remote.ref === "string" && entry.remote.ref ? { ref: entry.remote.ref } : {}),
+        subpath: entry.remote.subpath,
+        commit: entry.remote.commit,
+      };
+    } else if (entry.remote !== undefined) {
+      throw new SkillsymError("MANIFEST_CORRUPT", `Manifest remote entry for "${name}" is malformed: ${file}`, { file, skill: name });
+    }
     skills[name] = {
       agents: entry.agents.filter((a): a is string => typeof a === "string"),
       mode: entry.mode === "copy" || entry.mode === "source-link" ? entry.mode : "link",
       scope: entry.scope === "project" ? "project" : "user",
       ...(typeof entry.source === "string" ? { source: entry.source } : {}),
       ...(typeof entry.sourceHash === "string" ? { sourceHash: entry.sourceHash } : {}),
+      ...(remote ? { remote } : {}),
     };
   }
   const libraries = Array.isArray(parsed.libraries) ? parsed.libraries.filter((l): l is string => typeof l === "string") : [];
