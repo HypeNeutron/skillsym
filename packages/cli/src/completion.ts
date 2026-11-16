@@ -16,7 +16,7 @@ export interface CompletionSource {
 
 const ALIASES: Record<string, string> = { ls: "list", rm: "remove", library: "lib" };
 /** Options that take a value, so the word after them is not a skill name. */
-const VALUE_OPTIONS = ["-a", "--agent", "-s", "--skill", "--only"];
+const VALUE_OPTIONS = ["-a", "--agent", "-s", "--skill", "--only", "--upstream"];
 export const COMPLETION_SHELLS = ["powershell", "bash", "zsh"];
 
 /** Candidates for the word being typed (`current`), given the words before it. */
@@ -38,7 +38,7 @@ export async function complete(current: string, before: string[], source: Comple
   };
   if (previous === "-a" || previous === "--agent") return fromList(await source.agents());
   if (previous === "--only") return fromList(source.statuses);
-  if (previous === "-s" || previous === "--skill") return matching(await source.skills());
+  if (previous === "-s" || previous === "--skill" || previous === "--upstream") return matching(await source.skills());
 
   if (!first) return typed.startsWith("-") ? matching(["--help", "--version"]) : matching(source.commands);
   const command = ALIASES[first] ?? first;

@@ -10,7 +10,7 @@ import type { Hub } from "./hub.js";
 import { createDirLink, readLinkTarget } from "./links.js";
 import { withLock, type LockOptions } from "./lock.js";
 import { readManifest, writeManifest } from "./manifest.js";
-import { discoverSkillOrigin, type GitRunner } from "./remote.js";
+import { discoverSkillOrigin, discoverSkillUpstreams, type GitRunner } from "./remote.js";
 import { expandSkillNames, isValidSkillName } from "./skills.js";
 import { applySkillsJsonDelivery } from "./skills-json.js";
 import { readState, samePath, writeState } from "./state.js";
@@ -218,6 +218,8 @@ export async function placeInHub(
   await fs.cp(from, staging, { recursive: true, errorOnExist: true });
   await fs.rename(staging, dest);
   const discoveredRemote = await discoverSkillOrigin(skill, dest, { sourceDir: from, hub, profiles: options.profiles, git: options.git });
+  const discoveredUpstreams =
+    discoveredRemote ? [] : await discoverSkillUpstreams(skill, dest, { hub, profiles: options.profiles, git: options.git });
   const manifest = await readManifest(hub.manifestPath);
   const existing = manifest.skills[skill];
   if (!existing) {
@@ -228,9 +230,11 @@ export async function placeInHub(
       source: from,
       sourceHash: await hashSkillDir(dest),
       ...(discoveredRemote ? { remote: discoveredRemote } : {}),
+      ...(discoveredUpstreams.length ? { upstreams: discoveredUpstreams } : {}),
     };
-  } else if (!existing.remote && discoveredRemote) {
-    existing.remote = discoveredRemote;
+  } else {
+    if (!existing.remote && discoveredRemote) existing.remote = discoveredRemote;
+    if (!existing.upstreams?.length && discoveredUpstreams.length) existing.upstreams = discoveredUpstreams;
   }
   await writeManifest(hub.manifestPath, manifest);
 }

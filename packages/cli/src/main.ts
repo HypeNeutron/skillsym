@@ -40,14 +40,19 @@ import {
   parseRemoteTarget,
   planRemoteAdd,
   addRemoteSkills,
+  addRemoteUpstreams,
   planUpdate,
   updateSkills,
   resolveUpdateConflicts,
+  markUpstreamsReviewed,
   type ParsedRemoteTarget,
   type RemoteAddItem,
+  type AttachUpstreamResult,
   type UpdateDecision,
   type UpdateItem,
   type UpdateResolution,
+  type UpstreamReviewDecision,
+  type UpstreamReviewResult,
   resolveConflicts,
   scanStatus,
   type UnlinkResult,
@@ -170,6 +175,8 @@ Options:
                      status, check: list every link
   -dr, --dry-run     Show what would change without changing anything
   --link             With add: link to your library instead of copying (the library stays the source of truth)
+  --upstream <skill> With add: watch a repo for an existing orchestrator skill without editing its files
+  --mark-reviewed    With update: mark watched orchestrator upstream changes as reviewed
   -y, --yes          Never ask questions: sync/import conflicts are reported and left alone; remove and eject proceed
   -g, --global       User-level skills (the default; accepted for familiarity with npx skills)
   -p, --project      Project-level skills: not available until v0.2
@@ -188,14 +195,14 @@ class MissingSkillName extends UsageError {}
 export const COMMAND_OPTIONS: Record<string, string[]> = {
   init: [],
   // These never ask, but -y is a common habit and harmless.
-  add: ["agent", "skill", "all", "dry-run", "link", "yes"],
+  add: ["agent", "skill", "all", "dry-run", "link", "upstream", "yes"],
   assign: ["agent", "skill", "all", "yes"],
   list: ["agent"],
   ls: ["agent"],
   status: ["all", "agent", "skill", "only"],
   check: ["all", "agent", "skill", "only"],
   sync: ["agent", "skill", "dry-run", "yes"],
-  update: ["skill", "all", "dry-run", "yes"],
+  update: ["skill", "all", "dry-run", "mark-reviewed", "yes"],
   import: ["agent", "skill", "dry-run", "yes", "continue", "abort"],
   remove: ["agent", "skill", "all", "dry-run", "yes"],
   rm: ["agent", "skill", "all", "dry-run", "yes"],
@@ -422,6 +429,21 @@ async function run(argv: string[], io: Io, json: boolean): Promise<ExitCode> {
       const rawTarget = rest[0]!;
       const cwd = io.cwd ?? process.cwd();
       const remoteTarget = await parseRemoteTarget(rawTarget, cwd);
+      if (values.upstream) {
+        if (!remoteTarget) {
+          throw new UsageError("--upstream requires a GitHub repo or git URL: skillsym add <owner/repo> [-s <skill>] --upstream <hub-skill>");
+        }
+        if (values.link || values.agent?.length) {
+          throw new UsageError("--upstream only attaches upstream watch metadata; omit --link and -a");
+        }
+        const attached = await addRemoteUpstreams(hub, remoteTarget, values.upstream, {
+          ...(values.skill?.length ? { skills: values.skill } : {}),
+          dryRun: Boolean(values["dry-run"]),
+        });
+        if (json) io.stdout(JSON.stringify({ dryRun: Boolean(values["dry-run"]), ...attached }));
+        else io.stdout(formatUpstreamAttach(attached, Boolean(values["dry-run"])));
+        return 0;
+      }
       if (remoteTarget) {
         return addFromRemote(hub, remoteTarget, values.skill ?? [], agents, profiles, io, json, Boolean(values["dry-run"]), Boolean(values.link));
       }
@@ -529,33 +551,59 @@ async function run(argv: string[], io: Io, json: boolean): Promise<ExitCode> {
     }
     case "update": {
       if (agents.length && values.agent?.length) throw new UsageError("update does not take -a; agent links already point to the hub");
+      if (values["dry-run"] && values["mark-reviewed"]) throw new UsageError("use either --dry-run or --mark-reviewed, not both");
       const skills = values.all ? [] : [...rest, ...(values.skill ?? [])];
-      const choice = { profiles, ...(skills.length ? { skills } : {}) };
+      const markReviewed = Boolean(values["mark-reviewed"]);
+      const choice = { profiles, ...(skills.length ? { skills } : {}), ...(markReviewed ? { markReviewed: true } : {}) };
       const canAsk = Boolean(io.interactive && io.ask && !json && !values.yes);
       if (values["dry-run"]) {
         const plan = await planUpdate(hub, choice);
         if (json) io.stdout(JSON.stringify({ dryRun: true, ...plan }));
         else io.stdout(formatUpdates(plan.items, true, Boolean(skills.length), false));
-        return plan.items.some((i) => i.status === "conflict" || i.status === "upstream-missing") ? 1 : 0;
+        return plan.items.some((i) => i.status === "conflict" || i.status === "upstream-missing" || i.status === "upstream-changed") ? 1 : 0;
       }
       const result = await updateSkills(hub, choice);
       const conflicts = result.items.filter((i) => i.status === "conflict");
+      const watched = result.items.filter((i) => i.status === "upstream-changed");
       const missingUpstream = result.items.some((i) => i.status === "upstream-missing");
       if (!json && result.snapshotFailed.length) io.stderr(`warning: could not update the library snapshot of ${result.snapshotFailed.join(", ")}.`);
       if (json) io.stdout(JSON.stringify({ dryRun: false, ...result }));
-      else if (result.items.some((i) => i.status !== "conflict") || !conflicts.length || !canAsk) {
-        io.stdout(formatUpdates(canAsk ? result.items.filter((i) => i.status !== "conflict") : result.items, false, Boolean(skills.length), !canAsk));
+      else if (result.items.some((i) => i.status !== "conflict" && i.status !== "upstream-changed") || (!conflicts.length && !watched.length) || !canAsk) {
+        io.stdout(
+          formatUpdates(
+            canAsk ? result.items.filter((i) => i.status !== "conflict" && i.status !== "upstream-changed") : result.items,
+            false,
+            Boolean(skills.length),
+            !canAsk,
+          ),
+        );
       }
-      if (!conflicts.length || !canAsk) return conflicts.length || missingUpstream ? 1 : 0;
+      if ((!conflicts.length && !watched.length) || !canAsk) {
+        return conflicts.length || watched.length || missingUpstream ? 1 : 0;
+      }
 
-      const decisions = await askUpdateDecisions(conflicts, io);
-      const resolutions = await resolveUpdateConflicts(hub, decisions, choice);
-      io.stdout(formatUpdateResolutions(resolutions));
-      if (resolutions.some((r) => r.choice === "keep")) {
-        io.stdout("\nKept local edits unchanged. Run `skillsym update` again whenever you want to overwrite or recheck.");
+      const conflictResolutions = conflicts.length
+        ? await resolveUpdateConflicts(hub, await askUpdateDecisions(conflicts, io), choice)
+        : [];
+      if (conflictResolutions.length) {
+        io.stdout(formatUpdateResolutions(conflictResolutions));
+        if (conflictResolutions.some((r) => r.choice === "keep")) {
+          io.stdout("\nKept local edits unchanged. Run `skillsym update` again whenever you want to overwrite or recheck.");
+        }
       }
-      if (resolutions.some((r) => !r.ok)) return 2;
-      return resolutions.some((r) => r.choice === "keep") || missingUpstream ? 1 : 0;
+
+      const reviewResults = watched.length
+        ? await markUpstreamsReviewed(hub, await askUpstreamReviews(watched, io))
+        : [];
+      if (reviewResults.length) {
+        io.stdout(formatUpstreamReviews(reviewResults));
+        if (reviewResults.some((r) => r.choice === "skip")) {
+          io.stdout("\nUnreviewed upstreams remain flagged. Run `skillsym update --mark-reviewed` once you finish merging.");
+        }
+      }
+
+      if (conflictResolutions.some((r) => !r.ok) || reviewResults.some((r) => !r.ok)) return 2;
+      return conflictResolutions.some((r) => r.choice === "keep") || reviewResults.some((r) => r.choice === "skip") || missingUpstream ? 1 : 0;
     }
     case "import": {
       const skills = [...rest, ...(values.skill ?? [])];
@@ -936,12 +984,38 @@ function formatRemoteAdd(items: RemoteAddItem[], label: string, commit: string, 
   return lines.join("\n");
 }
 
+function formatUpstreamAttach(res: AttachUpstreamResult, dryRun: boolean): string {
+  const shortCommit = res.commit.slice(0, 7);
+  const lines = [`${dryRun ? "Would watch" : "Watching"} ${res.items.length} upstream(s) for "${res.hostSkill}" from ${res.target.label} (${shortCommit}):`];
+  for (const item of res.items) {
+    lines.push(`  [${item.type}] ${item.subpath || "."}`);
+  }
+  lines.push(`Files inside "${res.hostSkill}" were not touched.`);
+  if (dryRun) lines.push("", "Nothing was changed. Run the same command without --dry-run to save.");
+  return lines.join("\n");
+}
+
+function formatUpstreamChangeDetail(skill: string, c: NonNullable<UpdateItem["upstreamChanges"]>[number]): string[] {
+  const repoLabel = c.url.replace(/\.git$/i, "");
+  const scope = c.subpath || ".";
+  const diffCmd = `git -C "${c.repoDir}" diff ${c.oldCommit.slice(0, 7)}..${c.newCommit.slice(0, 7)}${c.subpath ? ` -- "${c.subpath}"` : ""}`;
+  const out = [
+    `  ${skill}: ${repoLabel} (${scope})  ${c.oldCommit.slice(0, 7)} -> ${c.newCommit.slice(0, 7)}`,
+    ...c.changedFiles.slice(0, 10).map((f) => `    ${f}`),
+  ];
+  if (c.changedFiles.length > 10) out.push(`    ...and ${c.changedFiles.length - 10} more file(s)`);
+  out.push(`    diff: ${diffCmd}`);
+  return out;
+}
+
 function formatUpdates(items: UpdateItem[], dryRun: boolean, explicitSkills: boolean, reportConflicts: boolean): string {
   if (!items.length) return "Nothing in the hub to update.";
   const lines: string[] = [];
   const updated = items.filter((i) => i.status === "updated");
-  const upToDate = items.filter((i) => i.status === "up-to-date");
+  const reviewed = items.filter((i) => i.status === "up-to-date" && i.reviewed);
+  const upToDate = items.filter((i) => i.status === "up-to-date" && !i.reviewed);
   const missing = items.filter((i) => i.status === "upstream-missing");
+  const watched = items.filter((i) => i.status === "upstream-changed");
   const conflicts = items.filter((i) => i.status === "conflict");
   const localOnly = items.filter((i) => i.status === "local-only");
   const width = Math.max(1, ...items.map((i) => i.skill.length));
@@ -951,6 +1025,15 @@ function formatUpdates(items: UpdateItem[], dryRun: boolean, explicitSkills: boo
       const revs = u.oldCommit && u.newCommit ? ` (${u.oldCommit.slice(0, 7)} -> ${u.newCommit.slice(0, 7)})` : "";
       lines.push(`${dryRun ? "would update" : "updated     "}  ${u.skill.padEnd(width)}${revs}`);
       if (u.backup) lines.push(`              backup: ${u.backup}`);
+    }
+  }
+  if (reviewed.length) {
+    for (const r of reviewed) lines.push(`reviewed    ${r.skill.padEnd(width)}  upstream baseline(s) marked reviewed`);
+  }
+  if (watched.length) {
+    lines.push(`UPSTREAM CHANGED (${watched.length}) — hub orchestrator files left untouched:`);
+    for (const w of watched) {
+      for (const ch of w.upstreamChanges ?? []) lines.push(...formatUpstreamChangeDetail(w.skill, ch));
     }
   }
   if (missing.length) {
@@ -963,24 +1046,59 @@ function formatUpdates(items: UpdateItem[], dryRun: boolean, explicitSkills: boo
     for (const l of localOnly) lines.push(`local-only  ${l.skill.padEnd(width)}  ${l.reason ?? "not git-tracked"}`);
   }
   if (upToDate.length) {
-    if (!updated.length && !missing.length && !conflicts.length && !(explicitSkills && localOnly.length)) {
+    if (!updated.length && !reviewed.length && !watched.length && !missing.length && !conflicts.length && !(explicitSkills && localOnly.length)) {
       lines.push(`Everything tracked (${upToDate.length}) is up to date.`);
     } else {
       lines.push(`Up to date: ${upToDate.map((u) => u.skill).join(", ")}`);
     }
   }
-  if (!explicitSkills && localOnly.length && !updated.length && !upToDate.length && !missing.length && !conflicts.length) {
+  if (!explicitSkills && localOnly.length && !updated.length && !reviewed.length && !upToDate.length && !watched.length && !missing.length && !conflicts.length) {
     lines.push(`Checked ${localOnly.length} skill(s): none are linked to GitHub or a git source.`);
   } else if (!explicitSkills && localOnly.length) {
     lines.push(`${localOnly.length} local skill(s) skipped (not git-tracked).`);
   }
   if (dryRun) {
     if (conflicts.length) lines.push("", `${conflicts.length} conflict(s) would ask whether to overwrite (with backup) or keep local edits.`);
+    if (watched.length) lines.push("", `${watched.length} orchestrator upstream change(s) ready to inspect; run \`skillsym update\` to review or \`--mark-reviewed\`.`);
     lines.push("", "Nothing was changed in your hub skills. Run `skillsym update` to apply.");
-  } else if (reportConflicts && conflicts.length) {
-    lines.push("", `${conflicts.length} conflict(s) left untouched. Run \`skillsym update\` in a terminal (without -y) to overwrite or keep.`);
+  } else if (reportConflicts) {
+    if (conflicts.length) lines.push("", `${conflicts.length} conflict(s) left untouched. Run \`skillsym update\` in a terminal (without -y) to overwrite or keep.`);
+    if (watched.length) lines.push("", `Run \`skillsym update --mark-reviewed\` once you finish reviewing/merging the upstream diff.`);
   }
   return lines.join("\n").trimStart();
+}
+
+async function askUpstreamReviews(watched: UpdateItem[], io: Io): Promise<UpstreamReviewDecision[]> {
+  const decisions: UpstreamReviewDecision[] = [];
+  let quit = false;
+  for (const item of watched) {
+    if (quit) {
+      decisions.push({ skill: item.skill, choice: "skip" });
+      continue;
+    }
+    io.stdout(`\nUPSTREAM CHANGED: ${item.skill} (hub files untouched)`);
+    for (const ch of item.upstreamChanges ?? []) {
+      for (const line of formatUpstreamChangeDetail(item.skill, ch)) io.stdout(line);
+    }
+    io.stdout("  [m] mark-reviewed  record these upstream commit(s) as reviewed");
+    io.stdout("  [s] skip           keep flagged until you finish merging");
+    const answer = await askOne(io, ["mark-reviewed", "skip"]);
+    if (answer === "quit") {
+      quit = true;
+      decisions.push({ skill: item.skill, choice: "skip" });
+      continue;
+    }
+    decisions.push({ skill: item.skill, choice: answer, changes: item.upstreamChanges });
+  }
+  return decisions;
+}
+
+function formatUpstreamReviews(results: UpstreamReviewResult[]): string {
+  const lines = results.map((r) => {
+    if (!r.ok) return `FAILED     ${r.choice} ${r.skill}: ${r.error}`;
+    return r.choice === "mark-reviewed" ? `reviewed   ${r.skill}` : `skipped    ${r.skill}`;
+  });
+  return ["", ...lines].join("\n");
 }
 
 async function askUpdateDecisions(conflicts: UpdateItem[], io: Io): Promise<UpdateDecision[]> {
@@ -1284,6 +1402,8 @@ function parseCommandLine(argv: string[]) {
         all: { type: "boolean" },
         "dry-run": { type: "boolean" },
         link: { type: "boolean" },
+        upstream: { type: "string" },
+        "mark-reviewed": { type: "boolean" },
         continue: { type: "boolean" },
         abort: { type: "boolean" },
         yes: { type: "boolean", short: "y" },
@@ -1313,6 +1433,9 @@ function formatList(skills: SkillInfo[], indent = "", libraries: string[] = []):
     } else if (s.remote) {
       const repo = s.remote.url.replace(/\.git$/i, "");
       note = `from ${repo}${s.remote.ref ? `@${s.remote.ref}` : ""}`;
+    } else if (s.upstreams?.length) {
+      const repos = [...new Set(s.upstreams.map((u) => u.url.replace(/\.git$/i, "")))];
+      note = `watches ${repos.join(", ")}`;
     }
     if (!note) return "";
     if (!notes.includes(note)) notes.push(note);

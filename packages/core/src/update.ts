@@ -10,6 +10,7 @@ import { withLock, type LockOptions } from "./lock.js";
 import { readManifest, writeManifest, type ManifestSkill, type RemoteSkillInfo } from "./manifest.js";
 import {
   discoverSkillOrigin,
+  discoverSkillUpstreams,
   inspectLocalGitSource,
   parseRemoteTarget,
   runGit,
@@ -23,7 +24,17 @@ import { expandSkillNames, replaceHubSkillFromSource } from "./skills.js";
 import { refreshSkillsJsonManifests } from "./skills-json.js";
 import { refreshLibrarySnapshots } from "./snapshots.js";
 
-export type UpdateItemStatus = "up-to-date" | "updated" | "conflict" | "upstream-missing" | "local-only";
+export type UpdateItemStatus = "up-to-date" | "updated" | "conflict" | "upstream-missing" | "upstream-changed" | "local-only";
+
+export interface UpstreamChange {
+  url: string;
+  ref?: string;
+  subpath: string;
+  repoDir: string;
+  oldCommit: string;
+  newCommit: string;
+  changedFiles: string[];
+}
 
 export interface UpdateItem {
   skill: string;
@@ -34,6 +45,8 @@ export interface UpdateItem {
   newCommit?: string;
   backup?: string;
   reason?: string;
+  upstreamChanges?: UpstreamChange[];
+  reviewed?: boolean;
 }
 
 export interface UpdateOptions {
@@ -43,6 +56,8 @@ export interface UpdateOptions {
   git?: GitRunner;
   /** Set false to inspect cached/local checkouts without fetching upstream. */
   fetch?: boolean;
+  /** Advance watched `upstreams[].commit` baselines on combined/orchestrator skills. */
+  markReviewed?: boolean;
   lock?: LockOptions;
 }
 
@@ -75,6 +90,23 @@ interface ResolvedUpstream {
   upstreamHash?: string;
   newCommit?: string;
   backfilledRemote?: RemoteSkillInfo;
+  nextUpstreams?: RemoteSkillInfo[];
+  upstreamsWereBackfilled?: boolean;
+}
+
+export type UpstreamReviewChoice = "mark-reviewed" | "skip";
+
+export interface UpstreamReviewDecision {
+  skill: string;
+  choice: UpstreamReviewChoice;
+  changes?: UpstreamChange[];
+}
+
+export interface UpstreamReviewResult {
+  skill: string;
+  choice: UpstreamReviewChoice;
+  ok: boolean;
+  error?: string;
 }
 
 function selectTargetSkills(allNames: string[], requested?: string[]): string[] {
@@ -119,15 +151,20 @@ async function evaluateUpdates(hub: Hub, options: UpdateOptions, dryRun: boolean
   const remoteCache = new Map<string, Promise<RemoteSyncResult>>();
   const localPulled = new Set<string>();
 
-  // Resolve effective remote metadata up front (explicit entry.remote or lazy offline discovery
-  // from SKILL.md frontmatter / .skill-lock.json / local git origin).
+  // Resolve effective remote metadata up front (explicit entry.remote, watched entry.upstreams,
+  // or lazy offline discovery from SKILL.md / .skill-lock.json / NOTICE.md / nested _archive / local git origin).
   const effectiveRemotes = new Map<string, { remote: RemoteSkillInfo; backfilled: boolean }>();
+  const effectiveUpstreams = new Map<string, { list: RemoteSkillInfo[]; backfilled: boolean }>();
   const localGitByName = new Map<string, Awaited<ReturnType<typeof inspectLocalGitSource>>>();
 
   for (const name of names) {
     const e = manifest.skills[name]!;
     if (e.remote) {
       effectiveRemotes.set(name, { remote: e.remote, backfilled: false });
+      continue;
+    }
+    if (e.upstreams?.length) {
+      effectiveUpstreams.set(name, { list: e.upstreams, backfilled: false });
       continue;
     }
     const hubSkillDir = path.join(hub.skillsDir, name);
@@ -152,6 +189,16 @@ async function evaluateUpdates(hub: Hub, options: UpdateOptions, dryRun: boolean
       // Clear local-without-origin fallback so update fetches from the discovered online origin.
       localGitByName.delete(name);
       effectiveRemotes.set(name, { remote: discovered, backfilled: true });
+      continue;
+    }
+    const discoveredUpstreams = await discoverSkillUpstreams(name, hubSkillDir, {
+      hub,
+      profiles: options.profiles,
+      git,
+    });
+    if (discoveredUpstreams.length) {
+      localGitByName.delete(name);
+      effectiveUpstreams.set(name, { list: discoveredUpstreams, backfilled: true });
     }
   }
 
@@ -200,6 +247,89 @@ async function evaluateUpdates(hub: Hub, options: UpdateOptions, dryRun: boolean
   for (const name of names) {
     const entry = manifest.skills[name]!;
     const hubSkillDir = path.join(hub.skillsDir, name);
+    const watched = effectiveUpstreams.get(name);
+    if (watched) {
+      const changes: UpstreamChange[] = [];
+      const resolvedList: RemoteSkillInfo[] = [];
+      let baselineMoved = false;
+
+      for (const u of watched.list) {
+        const syncInfo = await syncRepoOnce(u);
+        const oldCommit = u.commit;
+        const newCommit = syncInfo.commit;
+        if (!oldCommit) {
+          resolvedList.push({ ...u, commit: newCommit });
+          baselineMoved = true;
+          continue;
+        }
+        if (oldCommit === newCommit) {
+          resolvedList.push(u);
+          continue;
+        }
+        // Check git diff scoped to `u.subpath` so unrelated commits in a monorepo do not nag.
+        let diffFiles: string[] = [];
+        let oldCommitValid = true;
+        try {
+          await git(["rev-parse", "--verify", "--quiet", `${oldCommit}^{commit}`], syncInfo.repoDir);
+          const diffOut = await git(
+            ["diff", "--name-status", `${oldCommit}..${newCommit}`, ...(u.subpath ? ["--", u.subpath] : [])],
+            syncInfo.repoDir,
+          );
+          diffFiles = diffOut
+            .split(/\r?\n/)
+            .map((line) => line.trim())
+            .filter(Boolean);
+        } catch {
+          oldCommitValid = false;
+        }
+
+        if (u.subpath && oldCommitValid && !diffFiles.length) {
+          resolvedList.push({ ...u, commit: newCommit });
+          baselineMoved = true;
+          continue;
+        }
+
+        changes.push({
+          url: u.url,
+          ...(u.ref ? { ref: u.ref } : {}),
+          subpath: u.subpath,
+          repoDir: syncInfo.repoDir,
+          oldCommit,
+          newCommit,
+          changedFiles: diffFiles,
+        });
+        resolvedList.push(options.markReviewed ? { ...u, commit: newCommit } : u);
+      }
+
+      if (changes.length && !options.markReviewed) {
+        results.push({
+          item: {
+            skill: name,
+            status: "upstream-changed",
+            remoteUrl: changes[0]!.url,
+            oldCommit: changes[0]!.oldCommit,
+            newCommit: changes[0]!.newCommit,
+            upstreamChanges: changes,
+            reason: `${changes.length} watched upstream(s) changed; review before merging into your orchestrator`,
+          },
+          nextUpstreams: baselineMoved ? resolvedList : undefined,
+          upstreamsWereBackfilled: watched.backfilled,
+        });
+      } else {
+        results.push({
+          item: {
+            skill: name,
+            status: "up-to-date",
+            ...(watched.list[0] ? { remoteUrl: watched.list[0].url } : {}),
+            ...(changes.length ? { upstreamChanges: changes, reviewed: true } : {}),
+          },
+          nextUpstreams: changes.length || baselineMoved || watched.backfilled ? resolvedList : undefined,
+          upstreamsWereBackfilled: watched.backfilled,
+        });
+      }
+      continue;
+    }
+
     const effective = effectiveRemotes.get(name);
     const localGit = localGitByName.get(name) ?? null;
 
@@ -506,6 +636,11 @@ export async function updateSkills(hub: Hub, options: UpdateOptions = {}): Promi
         const skill = manifest.skills[entry.item.skill];
         if (!skill) continue;
 
+        if (entry.nextUpstreams) {
+          skill.upstreams = entry.nextUpstreams;
+          manifestChanged = true;
+        }
+
         if (entry.backfilledRemote && !skill.remote) {
           skill.remote = {
             ...entry.backfilledRemote,
@@ -617,6 +752,51 @@ export async function resolveUpdateConflicts(
         await refreshSkillsJsonManifests(hub, options.profiles ?? builtinAgents(), manifest);
       }
       return resolutions;
+    },
+    options.lock,
+  );
+}
+
+/** Advance watched `upstreams[].commit` baselines for orchestrator skills once the user has reviewed them. */
+export async function markUpstreamsReviewed(
+  hub: Hub,
+  decisions: UpstreamReviewDecision[],
+  options: { lock?: LockOptions } = {},
+): Promise<UpstreamReviewResult[]> {
+  if (!decisions.length) return [];
+  return withLock(
+    hub.lockPath,
+    async () => {
+      const manifest = await readManifest(hub.manifestPath);
+      const results: UpstreamReviewResult[] = [];
+      let changed = false;
+
+      for (const d of decisions) {
+        if (d.choice === "skip") {
+          results.push({ skill: d.skill, choice: "skip", ok: true });
+          continue;
+        }
+        const entry = manifest.skills[d.skill];
+        if (!entry) {
+          results.push({ skill: d.skill, choice: d.choice, ok: false, error: `Skill "${d.skill}" is not in the hub.` });
+          continue;
+        }
+        if (entry.upstreams?.length && d.changes?.length) {
+          for (const ch of d.changes) {
+            const match = entry.upstreams.find(
+              (u) => u.url === ch.url && (u.ref ?? "") === (ch.ref ?? "") && u.subpath === ch.subpath,
+            );
+            if (match && match.commit !== ch.newCommit) {
+              match.commit = ch.newCommit;
+              changed = true;
+            }
+          }
+        }
+        results.push({ skill: d.skill, choice: "mark-reviewed", ok: true });
+      }
+
+      if (changed) await writeManifest(hub.manifestPath, manifest);
+      return results;
     },
     options.lock,
   );

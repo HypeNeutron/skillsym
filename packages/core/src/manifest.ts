@@ -35,6 +35,8 @@ export interface ManifestSkill {
   sourceHash?: string;
   /** Upstream git repository coordinates when added/attached from GitHub or git. */
   remote?: RemoteSkillInfo;
+  /** Watched upstream sources for combined/orchestrator skills (never auto-overwrites hub files). */
+  upstreams?: RemoteSkillInfo[];
 }
 
 /** The user's desired state. */
@@ -94,19 +96,13 @@ export async function readManifest(file: string): Promise<Manifest> {
     if (!isObject(entry) || !Array.isArray(entry.agents)) {
       throw new SkillsymError("MANIFEST_CORRUPT", `Manifest entry for "${name}" is malformed: ${file}`, { file, skill: name });
     }
-    let remote: RemoteSkillInfo | undefined;
-    if (isObject(entry.remote)) {
-      if (typeof entry.remote.url !== "string" || typeof entry.remote.subpath !== "string" || typeof entry.remote.commit !== "string") {
-        throw new SkillsymError("MANIFEST_CORRUPT", `Manifest remote entry for "${name}" is malformed: ${file}`, { file, skill: name });
+    const remote = entry.remote !== undefined ? parseRemoteSkillInfo(entry.remote, file, name, "remote") : undefined;
+    let upstreams: RemoteSkillInfo[] | undefined;
+    if (entry.upstreams !== undefined) {
+      if (!Array.isArray(entry.upstreams)) {
+        throw new SkillsymError("MANIFEST_CORRUPT", `Manifest upstreams entry for "${name}" is malformed: ${file}`, { file, skill: name });
       }
-      remote = {
-        url: entry.remote.url,
-        ...(typeof entry.remote.ref === "string" && entry.remote.ref ? { ref: entry.remote.ref } : {}),
-        subpath: entry.remote.subpath,
-        commit: entry.remote.commit,
-      };
-    } else if (entry.remote !== undefined) {
-      throw new SkillsymError("MANIFEST_CORRUPT", `Manifest remote entry for "${name}" is malformed: ${file}`, { file, skill: name });
+      upstreams = entry.upstreams.map((item) => parseRemoteSkillInfo(item, file, name, "upstreams"));
     }
     skills[name] = {
       agents: entry.agents.filter((a): a is string => typeof a === "string"),
@@ -115,6 +111,7 @@ export async function readManifest(file: string): Promise<Manifest> {
       ...(typeof entry.source === "string" ? { source: entry.source } : {}),
       ...(typeof entry.sourceHash === "string" ? { sourceHash: entry.sourceHash } : {}),
       ...(remote ? { remote } : {}),
+      ...(upstreams?.length ? { upstreams } : {}),
     };
   }
   const libraries = Array.isArray(parsed.libraries) ? parsed.libraries.filter((l): l is string => typeof l === "string") : [];
@@ -134,6 +131,18 @@ function serialize(manifest: Manifest): string {
     ...(manifest.skippedLibrarySkills?.length ? { skippedLibrarySkills: [...manifest.skippedLibrarySkills] } : {}),
   };
   return JSON.stringify(sorted, null, 2) + "\n";
+}
+
+function parseRemoteSkillInfo(raw: unknown, file: string, skill: string, field: string): RemoteSkillInfo {
+  if (!isObject(raw) || typeof raw.url !== "string" || typeof raw.subpath !== "string" || typeof raw.commit !== "string") {
+    throw new SkillsymError("MANIFEST_CORRUPT", `Manifest ${field} entry for "${skill}" is malformed: ${file}`, { file, skill });
+  }
+  return {
+    url: raw.url,
+    ...(typeof raw.ref === "string" && raw.ref ? { ref: raw.ref } : {}),
+    subpath: raw.subpath,
+    commit: raw.commit,
+  };
 }
 
 function isObject(v: unknown): v is Record<string, unknown> {

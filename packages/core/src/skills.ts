@@ -9,7 +9,7 @@ import { hashSkillDir } from "./hash.js";
 import type { Hub } from "./hub.js";
 import { withLock, type LockOptions } from "./lock.js";
 import { readManifest, writeManifest, type RemoteSkillInfo, type SkillMode, type SkillScope } from "./manifest.js";
-import { discoverSkillOrigin, type GitRunner } from "./remote.js";
+import { discoverSkillOrigin, discoverSkillUpstreams, type GitRunner } from "./remote.js";
 
 export interface SkillInfo {
   name: string;
@@ -22,6 +22,8 @@ export interface SkillInfo {
   source?: string;
   /** Upstream git provenance when installed from or attached to GitHub/git. */
   remote?: RemoteSkillInfo;
+  /** Watched upstream sources for combined/orchestrator skills. */
+  upstreams?: RemoteSkillInfo[];
 }
 
 export interface AddSkillOptions {
@@ -115,6 +117,8 @@ export async function copyIntoHub(
 
   const discoveredRemote =
     options.remote ?? (await discoverSkillOrigin(name, dest, { sourceDir: source, hub, profiles: options.profiles, git: options.git }));
+  const discoveredUpstreams =
+    discoveredRemote ? [] : await discoverSkillUpstreams(name, dest, { hub, profiles: options.profiles, git: options.git });
   const manifest = await readManifest(hub.manifestPath);
   manifest.skills[name] = {
     agents: [],
@@ -123,6 +127,7 @@ export async function copyIntoHub(
     source,
     sourceHash: await hashSkillDir(dest),
     ...(discoveredRemote ? { remote: discoveredRemote } : {}),
+    ...(discoveredUpstreams.length ? { upstreams: discoveredUpstreams } : {}),
   };
   try {
     await writeManifest(hub.manifestPath, manifest);
@@ -130,7 +135,15 @@ export async function copyIntoHub(
     await fs.rm(dest, { recursive: true, force: true });
     throw err;
   }
-  return { name, path: dest, agents: [], mode: "link", scope: "user", ...(discoveredRemote ? { remote: discoveredRemote } : {}) };
+  return {
+    name,
+    path: dest,
+    agents: [],
+    mode: "link",
+    scope: "user",
+    ...(discoveredRemote ? { remote: discoveredRemote } : {}),
+    ...(discoveredUpstreams.length ? { upstreams: discoveredUpstreams } : {}),
+  };
 }
 
 /**
@@ -180,6 +193,7 @@ export async function listSkills(hub: Hub): Promise<SkillInfo[]> {
         scope: entry.scope,
         ...(entry.source ? { source: entry.source } : {}),
         ...(entry.remote ? { remote: { ...entry.remote } } : {}),
+        ...(entry.upstreams?.length ? { upstreams: entry.upstreams.map((u) => ({ ...u })) } : {}),
       };
     });
 }

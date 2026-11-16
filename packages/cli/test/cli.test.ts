@@ -1109,4 +1109,37 @@ describe("skillsym CLI", () => {
     expect(conflict.stdout).toContain("CONFLICT");
     expect(await fs.readFile(path.join(home, "skills", "first", "a.md"), "utf8")).toBe("local custom\n");
   });
+
+  it("add --upstream watches an orchestrator upstream without touching host files, and --mark-reviewed advances baseline", async () => {
+    const repo = path.join(root, "orch-upstream");
+    await fs.mkdir(repo, { recursive: true });
+    await runGit(["init", "-b", "main"], repo);
+    await runGit(["config", "user.email", "test@skillsym.dev"], repo);
+    await runGit(["config", "user.name", "Test"], repo);
+    await makeSkill(path.join(repo, "skills"), "subskill", { "guide.md": "v1\n" });
+    await runGit(["add", "."], repo);
+    await runGit(["commit", "-m", "v1"], repo);
+
+    await run(["add", await makeSkill(path.join(root, "host"), "orchestrator", { "modules/flow.md": "custom\n" })]);
+    const url = pathToFileURL(repo).toString();
+    const attached = run(["add", url, "-s", "subskill", "--upstream", "orchestrator"]);
+    expect(attached.code).toBe(0);
+    expect(attached.stdout).toContain('Watching 1 upstream(s) for "orchestrator"');
+    expect(run(["list"]).stdout).toContain(`watches ${url}`);
+
+    await fs.writeFile(path.join(repo, "skills", "subskill", "guide.md"), "v2\n");
+    await runGit(["add", "."], repo);
+    await runGit(["commit", "-m", "v2"], repo);
+
+    const detected = run(["update", "orchestrator", "--dry-run"]);
+    expect(detected.code).toBe(1);
+    expect(detected.stdout).toContain("UPSTREAM CHANGED");
+    expect(detected.stdout).toContain("skills/subskill/guide.md");
+    expect(await fs.readFile(path.join(home, "skills", "orchestrator", "modules", "flow.md"), "utf8")).toBe("custom\n");
+
+    const reviewed = run(["update", "orchestrator", "--mark-reviewed"]);
+    expect(reviewed.code).toBe(0);
+    expect(reviewed.stdout).toContain("reviewed");
+    expect(run(["update", "orchestrator", "--dry-run"]).code).toBe(0);
+  });
 });

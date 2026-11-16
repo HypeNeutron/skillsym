@@ -6,7 +6,7 @@ import { promisify } from "node:util";
 import { builtinAgents, type AgentProfile } from "./agents.js";
 import { backupStamp } from "./backup.js";
 import { SkillsymError } from "./errors.js";
-import { isDirectory, pathExists, renameWithRetry } from "./fsutil.js";
+import { isDirectory, isFile, pathExists, renameWithRetry } from "./fsutil.js";
 import { hashSkillDir } from "./hash.js";
 import type { Hub } from "./hub.js";
 import { filterLibrarySkills, findLibrarySkills, isInGit } from "./library.js";
@@ -815,4 +815,177 @@ export async function discoverSkillOrigin(
   }
 
   return null;
+}
+
+const GITHUB_URL_IN_TEXT_RE = /https:\/\/github\.com\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+(?:\/tree\/[A-Za-z0-9_.~/%-]+)?/gi;
+
+function upstreamKey(u: RemoteSkillInfo): string {
+  return `${u.url}\0${u.ref ?? ""}\0${u.subpath}`;
+}
+
+/**
+ * Offline discovery of multiple upstream sources referenced by a combined/orchestrator skill:
+ * scans `NOTICE.md` for explicit GitHub URLs and nested sub-skill folders (e.g. `_archive/* /SKILL.md`)
+ * via `discoverSkillOrigin`. Never overwrites or modifies hub files.
+ */
+export async function discoverSkillUpstreams(
+  _skillName: string,
+  skillDir: string,
+  options: DiscoverOriginOptions = {},
+): Promise<RemoteSkillInfo[]> {
+  const found: RemoteSkillInfo[] = [];
+  const seen = new Set<string>();
+  const add = (info: RemoteSkillInfo | null) => {
+    if (!info) return;
+    const key = upstreamKey(info);
+    if (seen.has(key)) return;
+    seen.add(key);
+    found.push(info);
+  };
+
+  // 1. Explicit https://github.com/<owner>/<repo> links in NOTICE.md.
+  try {
+    const notice = await fs.readFile(path.join(skillDir, "NOTICE.md"), "utf8");
+    for (const m of notice.matchAll(GITHUB_URL_IN_TEXT_RE)) {
+      const cleaned = m[0]!.replace(/[.,;:)>]+$/, "");
+      try {
+        const parsed = parseRemoteSpec(cleaned);
+        if (parsed) {
+          add({
+            url: parsed.url,
+            ...(parsed.ref ? { ref: parsed.ref } : {}),
+            subpath: parsed.subpath,
+            commit: "",
+          });
+        }
+      } catch {
+        // Ignore malformed links in prose.
+      }
+    }
+  } catch {
+    // NOTICE.md is optional.
+  }
+
+  // 2. Nested child sub-skills (e.g. `_archive/00-start-here/SKILL.md`), excluding root SKILL.md.
+  async function walkNested(dir: string, depth: number): Promise<void> {
+    if (depth > 0 && (await isFile(path.join(dir, "SKILL.md")))) {
+      add(
+        await discoverSkillOrigin(path.basename(dir), dir, {
+          hub: options.hub,
+          homedir: options.homedir,
+          profiles: options.profiles,
+          git: options.git,
+        }),
+      );
+      return;
+    }
+    let entries;
+    try {
+      entries = await fs.readdir(dir, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const e of entries.sort((a, b) => a.name.localeCompare(b.name))) {
+      if (!e.isDirectory() || e.name === ".git" || e.name === "node_modules") continue;
+      await walkNested(path.join(dir, e.name), depth + 1);
+    }
+  }
+  await walkNested(skillDir, 0);
+
+  return found;
+}
+
+export interface AttachUpstreamItem {
+  url: string;
+  ref?: string;
+  subpath: string;
+  commit: string;
+  type: "added" | "updated" | "unchanged";
+}
+
+export interface AttachUpstreamResult {
+  hostSkill: string;
+  target: ParsedRemoteTarget;
+  repoDir: string;
+  commit: string;
+  items: AttachUpstreamItem[];
+}
+
+/**
+ * Attach one or more watched upstream sources from `target` to an existing hub skill (`hostSkill`)
+ * in `manifest.json` without modifying any files inside `<hub>/skills/<hostSkill>/`.
+ */
+export async function addRemoteUpstreams(
+  hub: Hub,
+  target: ParsedRemoteTarget,
+  hostSkill: string,
+  options: RemoteAddOptions & { dryRun?: boolean } = {},
+): Promise<AttachUpstreamResult> {
+  const run = async (): Promise<AttachUpstreamResult> => {
+    const manifest = await readManifest(hub.manifestPath);
+    const entry = manifest.skills[hostSkill];
+    if (!entry) {
+      throw new SkillsymError("SKILL_NOT_IN_HUB", `No skill named "${hostSkill}" in the hub.`, { skill: hostSkill });
+    }
+
+    const { repoDir, commit } = await syncRemoteClone(hub, target, { git: options.git, fetch: options.fetch });
+    const searchRoot = target.subpath ? path.join(repoDir, target.subpath) : repoDir;
+    if (!(await isDirectory(searchRoot))) {
+      throw new SkillsymError("SKILL_NOT_FOUND_AT_PATH", `Subpath "${target.subpath}" not found in ${target.label}.`, {
+        target: target.label,
+        subpath: target.subpath,
+      });
+    }
+
+    const toWatch: RemoteSkillInfo[] = [];
+    if (options.skills?.length) {
+      const discovered = await findLibrarySkills(searchRoot);
+      if (!discovered.length) {
+        throw new SkillsymError("MISSING_SKILL_MD", `No skills found under ${target.label}${target.subpath ? `/${target.subpath}` : ""}.`, {
+          target: target.label,
+          subpath: target.subpath,
+        });
+      }
+      const selected = filterLibrarySkills(discovered, options.skills, target.label);
+      for (const s of selected) {
+        toWatch.push({
+          url: target.url,
+          ...(target.ref ? { ref: target.ref } : {}),
+          subpath: toPosixPath(path.relative(repoDir, s.path)),
+          commit,
+        });
+      }
+    } else {
+      toWatch.push({
+        url: target.url,
+        ...(target.ref ? { ref: target.ref } : {}),
+        subpath: target.subpath,
+        commit,
+      });
+    }
+
+    const current = [...(entry.upstreams ?? [])];
+    const items: AttachUpstreamItem[] = [];
+    for (const next of toWatch) {
+      const idx = current.findIndex((u) => upstreamKey(u) === upstreamKey(next));
+      if (idx === -1) {
+        current.push(next);
+        items.push({ ...next, type: "added" });
+      } else if (current[idx]!.commit !== next.commit) {
+        current[idx] = next;
+        items.push({ ...next, type: "updated" });
+      } else {
+        items.push({ ...next, type: "unchanged" });
+      }
+    }
+
+    if (!options.dryRun && items.some((i) => i.type !== "unchanged")) {
+      entry.upstreams = current;
+      await writeManifest(hub.manifestPath, manifest);
+    }
+
+    return { hostSkill, target, repoDir, commit, items };
+  };
+
+  return options.dryRun ? run() : withLock(hub.lockPath, run, options.lock);
 }

@@ -203,6 +203,7 @@ from, so skillsym does not give it a second copy of a skill it already sees. Set
 | `skillsym add <owner/repo> [-s skill] [-a agents] [--dry-run]` | Clone or fetch a GitHub/git repo into `<hub>/remotes/` and copy its skills (or only `-s <skill>`) into the hub; attaches tracking if a skill already exists there. |
 | `skillsym add <library> [-a agents] [--dry-run]` | A folder of skills: copy every skill in it (any depth; `.git` and `node_modules` are skipped). The library is not changed. |
 | `skillsym add <library> --link [-a agents]` | Link the hub to your library instead of copying it. Run it again to pick up new skills, or to point at the library's new location after you move it. |
+| `skillsym add <owner/repo> [-s skill] --upstream <skill>` | Watch an upstream repo for a combined/orchestrator skill without touching its adapted hub files. |
 | `skillsym assign <skill...> -a <agents>` | Link hub skills into agents' folders. |
 | `skillsym list [-a agents]` / `ls` | List hub skills, their agents, and where linked/remote skills come from. |
 | `skillsym open <skill>` | Print a skill's folder and open it in `$EDITOR`, or your file manager. A `--link` skill opens in your library. |
@@ -235,6 +236,8 @@ Options:
 | `-dr, --dry-run` | Show what would change; change nothing. |
 | `--only <states>` | `status`, `check`: only these statuses, comma-separated (see [Status at a glance](#status-at-a-glance)). |
 | `--link` | With `add`: link to your library instead of copying it. |
+| `--upstream <skill>` | With `add`: attach an upstream repo as a watched dependency of `<skill>` without modifying its files. |
+| `--mark-reviewed` | With `update`: advance watched orchestrator upstream commits after inspecting their diff. |
 | `-y, --yes` | Never ask. Conflicts are reported and left alone; `remove` and `eject` proceed. |
 | `-g, --global` | User-level skills (the default). |
 | `-p, --project` | Project-level skills — arrives in v0.2. |
@@ -359,6 +362,11 @@ skillsym add https://github.com/owner/repo/tree/main/skills/my-skill
   deleting your local copy.
 - **Local git folders:** skills added from a local git repository with an `origin` remote (or whose source folder changed
   locally) are also updated by `skillsym update`; local `.git` repos without an `origin` stay `local-only` when unchanged.
+- **Orchestrator & combined skills (watch-and-diff):** for skills that adapt multiple upstreams (`plan-pipeline` with
+  `NOTICE.md`, or `gtm-cofounder` with `_archive/`), `skillsym` never overwrites your adapted `SKILL.md` or `modules/`.
+  Attach upstreams with `skillsym add <repo> [-s <skill>] --upstream <orchestrator>` (or let `add`/`import`/`update`
+  discover `NOTICE.md` links and nested `_archive/` sub-skills automatically). `skillsym update` prints which upstream
+  files changed plus the exact `git diff` command, then lets you confirm `[m]` or pass `--mark-reviewed` once merged.
 
 ## Antigravity and `skills-json` delivery
 

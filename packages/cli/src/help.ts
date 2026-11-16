@@ -19,12 +19,14 @@ Options:
   -s, --skill <name> Only add matching skill(s) from a repository or library (supports '*', '?')
   --all              Same as -a '*'
   --link             Link the hub to your library (or remote cache) instead of copying, so it stays the source of truth
+  --upstream <skill> Watch this repo for an existing orchestrator skill (never overwrites its files)
   -dr, --dry-run     Preview adding from a remote repository or library
   -y, --yes          Accepted; add never asks
 
 Examples:
   skillsym add ./my-skill -a claude,codex
   skillsym add vercel-labs/skills -s find-skills -a claude,antigravity
+  skillsym add mattpocock/skills --upstream plan-pipeline
   skillsym add ~/my-skills --dry-run
   skillsym add ~/my-skills --link -a claude`,
 
@@ -140,7 +142,8 @@ Options:
   -s, --skill <name> Skill names or patterns, instead of listing them first
   --all              Every skill in the hub (default)
   -dr, --dry-run     Check for upstream updates without modifying hub skills
-  -y, --yes          Never ask: locally edited conflicts are reported and kept untouched
+  --mark-reviewed    Mark watched orchestrator upstream changes as reviewed without prompting
+  -y, --yes          Never ask: locally edited conflicts and upstream changes are reported and left untouched
 
 Names may be patterns: * means any characters, ? one. Keep the quotes.
 

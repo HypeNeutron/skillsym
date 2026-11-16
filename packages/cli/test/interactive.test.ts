@@ -288,4 +288,29 @@ describe("update asks before overwriting locally edited skills", () => {
     expect(out.join("\n")).toContain("overwrote");
     expect(await fs.readFile(path.join(hubHome, "skills", "alpha", "body.md"), "utf8")).toBe("v2\n");
   });
+
+  it("asks [m] mark-reviewed / [s] skip for watched orchestrator upstream changes", async () => {
+    const repo = path.join(root, "repo");
+    await fs.mkdir(repo, { recursive: true });
+    await runGit(["init", "-b", "main"], repo);
+    await runGit(["config", "user.email", "test@skillsym.dev"], repo);
+    await runGit(["config", "user.name", "Test"], repo);
+    await makeSkill(path.join(repo, "skills"), "sub", { "body.md": "v1\n" });
+    await runGit(["add", "."], repo);
+    await runGit(["commit", "-m", "v1"], repo);
+
+    await main(["add", await makeSkill(path.join(root, "host"), "orch", { "modules/x.md": "custom\n" })], io());
+    await main(["add", pathToFileURL(repo).toString(), "-s", "sub", "--upstream", "orch"], io());
+
+    await fs.writeFile(path.join(repo, "skills", "sub", "body.md"), "v2\n");
+    await runGit(["add", "."], repo);
+    await runGit(["commit", "-m", "v2"], repo);
+
+    expect(await main(["update", "orch"], io([""]))).toBe(1);
+    expect(out.join("\n")).toContain("UPSTREAM CHANGED: orch");
+
+    expect(await main(["update", "orch"], io(["m"]))).toBe(0);
+    expect(out.join("\n")).toContain("reviewed");
+    expect(await fs.readFile(path.join(root, "hub", "skills", "orch", "modules", "x.md"), "utf8")).toBe("custom\n");
+  });
 });

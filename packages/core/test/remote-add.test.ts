@@ -5,9 +5,11 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
   addLibrary,
   addRemoteSkills,
+  addRemoteUpstreams,
   addSkill,
   assignSkills,
   builtinAgents,
+  discoverSkillUpstreams,
   hashSkillDir,
   openHub,
   parseRemoteTarget,
@@ -154,5 +156,35 @@ describe("addRemoteSkills & library -s filter", () => {
 
     const added = await addLibrary(hub, lib, { skills: ["two"] });
     expect(added.added.map((s) => s.name)).toEqual(["two"]);
+  });
+
+  it("discovers orchestrator upstreams from NOTICE.md / nested _archive and attaches --upstream without touching host files", async () => {
+    const repo = await createUpstreamRepo({
+      "grill-me": { "SKILL.md": "---\nname: grill-me\ndescription: x\n---\n" },
+      "other": { "a.md": "v1\n" },
+    });
+
+    const hostSrc = await makeSkill(path.join(root, "orch"), "my-orchestrator", {
+      "modules/intro.md": "custom orchestrator\n",
+      "NOTICE.md": "Adapted from https://github.com/mattpocock/skills and file credits.\nIgnore prose owner/word mentions.\n",
+      "_archive/nested/SKILL.md": "---\nname: nested\ndescription: x\nrepository: softaworks/agent-toolkit\nsubpath: skills/nested\n---\n",
+    });
+
+    const upstreams = await discoverSkillUpstreams("my-orchestrator", hostSrc);
+    expect(upstreams).toEqual([
+      { url: "https://github.com/mattpocock/skills.git", subpath: "", commit: "" },
+      { url: "https://github.com/softaworks/agent-toolkit.git", subpath: "skills/nested", commit: "" },
+    ]);
+
+    await addSkill(hub, await makeSkill(path.join(root, "plain-host"), "my-orch", { "modules/custom.md": "keep me\n" }));
+    const target = (await parseRemoteTarget(repo.url, root))!;
+    const attached = await addRemoteUpstreams(hub, target, "my-orch", { skills: ["grill-me"] });
+    expect(attached.items).toEqual([{ url: repo.url, subpath: "skills/grill-me", commit: repo.commit, type: "added" }]);
+    expect(await fs.readFile(path.join(hub.skillsDir, "my-orch", "modules", "custom.md"), "utf8")).toBe("keep me\n");
+
+    const manifest = await readManifest(hub.manifestPath);
+    expect(manifest.skills["my-orch"]?.upstreams).toEqual([
+      { url: repo.url, subpath: "skills/grill-me", commit: repo.commit },
+    ]);
   });
 });

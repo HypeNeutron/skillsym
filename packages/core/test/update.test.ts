@@ -4,10 +4,12 @@ import { pathToFileURL } from "node:url";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
   addRemoteSkills,
+  addRemoteUpstreams,
   addSkill,
   assignSkills,
   builtinAgents,
   hashSkillDir,
+  markUpstreamsReviewed,
   openHub,
   parseRemoteTarget,
   planUpdate,
@@ -237,5 +239,51 @@ describe("updateSkills & planUpdate", () => {
     const updated = await updateSkills(hub, { profiles });
     expect(updated.items[0]?.status).toBe("updated");
     expect(await fs.readFile(path.join(hub.skillsDir, "localcraft", "note.md"), "utf8")).toBe("v2 local\n");
+  });
+
+  it("watches orchestrator upstreams[] safely: diffs subpath commits without overwriting hub files, and advances baseline on mark-reviewed", async () => {
+    const repoDir = path.join(root, "upstream");
+    const c1 = await initRepo(repoDir, {
+      watched: { "guide.md": "v1\n" },
+      unrelated: { "guide.md": "v1\n" },
+    });
+    await addSkill(hub, await makeSkill(path.join(root, "orch"), "my-orchestrator", { "modules/flow.md": "adapted v1\n" }));
+    const target = (await parseRemoteTarget(pathToFileURL(repoDir).toString(), root))!;
+    await addRemoteUpstreams(hub, target, "my-orchestrator", { skills: ["watched"] });
+
+    // Commit touching only `unrelated` should silently fast-forward commit without noisy `upstream-changed`.
+    await fs.writeFile(path.join(repoDir, "skills", "unrelated", "guide.md"), "v2\n");
+    const cUnrelated = await commitRepo(repoDir, "unrelated change");
+    const quietCheck = await updateSkills(hub, { profiles });
+    expect(quietCheck.items[0]?.status).toBe("up-to-date");
+    expect((await readManifest(hub.manifestPath)).skills["my-orchestrator"]?.upstreams?.[0]?.commit).toBe(cUnrelated);
+
+    // Commit touching `watched` emits `upstream-changed` with changed files and never edits hub orchestrator files.
+    await fs.writeFile(path.join(repoDir, "skills", "watched", "guide.md"), "v2 upstream change\n");
+    const c3 = await commitRepo(repoDir, "watched skill updated");
+
+    const changedPlan = await updateSkills(hub, { profiles });
+    expect(changedPlan.items[0]?.status).toBe("upstream-changed");
+    expect(changedPlan.items[0]?.upstreamChanges).toEqual([
+      expect.objectContaining({
+        url: pathToFileURL(repoDir).toString(),
+        subpath: "skills/watched",
+        oldCommit: cUnrelated,
+        newCommit: c3,
+        changedFiles: ["M\tskills/watched/guide.md"],
+      }),
+    ]);
+    // Hub orchestrator files and baseline commit remain untouched until reviewed.
+    expect(await fs.readFile(path.join(hub.skillsDir, "my-orchestrator", "modules", "flow.md"), "utf8")).toBe("adapted v1\n");
+    expect((await readManifest(hub.manifestPath)).skills["my-orchestrator"]?.upstreams?.[0]?.commit).toBe(cUnrelated);
+    expect(cUnrelated).not.toBe(c1);
+
+    await markUpstreamsReviewed(hub, [
+      { skill: "my-orchestrator", choice: "mark-reviewed", changes: changedPlan.items[0]!.upstreamChanges },
+    ]);
+    expect((await readManifest(hub.manifestPath)).skills["my-orchestrator"]?.upstreams?.[0]?.commit).toBe(c3);
+
+    const after = await planUpdate(hub, { profiles });
+    expect(after.items[0]?.status).toBe("up-to-date");
   });
 });
