@@ -362,11 +362,12 @@ skillsym add https://github.com/owner/repo/tree/main/skills/my-skill
   deleting your local copy.
 - **Local git folders:** skills added from a local git repository with an `origin` remote (or whose source folder changed
   locally) are also updated by `skillsym update`; local `.git` repos without an `origin` stay `local-only` when unchanged.
-- **Orchestrator & combined skills (watch-and-diff):** for skills that adapt multiple upstreams (`plan-pipeline` with
-  `NOTICE.md`, or `gtm-cofounder` with `_archive/`), `skillsym` never overwrites your adapted `SKILL.md` or `modules/`.
-  Attach upstreams with `skillsym add <repo> [-s <skill>] --upstream <orchestrator>` (or let `add`/`import`/`update`
-  discover `NOTICE.md` links and nested `_archive/` sub-skills automatically). `skillsym update` prints which upstream
-  files changed plus the exact `git diff` command, then lets you confirm `[m]` or pass `--mark-reviewed` once merged.
+- **Orchestrator & combined skills (watch-and-diff):** for skills that adapt multiple upstreams (or archive raw skills
+  under `_archive/`), `skillsym` never overwrites your adapted `SKILL.md` or `modules/`. Attach upstreams explicitly with
+  `skillsym add <repo> [-s <skill>] --upstream <orchestrator>` (nested `_archive/` sub-skills with `repository:` or
+  `.skill-lock.json` entries are also detected automatically, while `NOTICE.md` credits stay informational).
+  `skillsym update` prints which upstream files changed plus the exact `git diff` command, then lets you confirm `[m]`
+  or pass `--mark-reviewed` once merged.
 
 ## Antigravity and `skills-json` delivery
 

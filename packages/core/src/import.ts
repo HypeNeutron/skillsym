@@ -4,7 +4,7 @@ import path from "node:path";
 import { agentDelivery, builtinAgents, planLinkGroups, resolveAgents, type AgentProfile } from "./agents.js";
 import { backupStamp, moveToBackup } from "./backup.js";
 import { SkillsymError } from "./errors.js";
-import { isDirectory, isFile } from "./fsutil.js";
+import { isDirectory, isFile, renameWithRetry } from "./fsutil.js";
 import { hashSkillDir, hasUtf8Bom } from "./hash.js";
 import type { Hub } from "./hub.js";
 import { createDirLink, readLinkTarget } from "./links.js";
@@ -216,7 +216,7 @@ export async function placeInHub(
   const dest = path.join(hub.skillsDir, skill);
   const staging = path.join(hub.tmpDir, `${skill}.${randomBytes(6).toString("hex")}`);
   await fs.cp(from, staging, { recursive: true, errorOnExist: true });
-  await fs.rename(staging, dest);
+  await renameWithRetry(staging, dest);
   const discoveredRemote = await discoverSkillOrigin(skill, dest, { sourceDir: from, hub, profiles: options.profiles, git: options.git });
   const discoveredUpstreams =
     discoveredRemote ? [] : await discoverSkillUpstreams(skill, dest, { hub, profiles: options.profiles, git: options.git });

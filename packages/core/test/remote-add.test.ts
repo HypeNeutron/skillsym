@@ -158,7 +158,7 @@ describe("addRemoteSkills & library -s filter", () => {
     expect(added.added.map((s) => s.name)).toEqual(["two"]);
   });
 
-  it("discovers orchestrator upstreams from NOTICE.md / nested _archive and attaches --upstream without touching host files", async () => {
+  it("discovers nested _archive upstreams (ignoring NOTICE.md credits) and attaches --upstream without touching host files", async () => {
     const repo = await createUpstreamRepo({
       "grill-me": { "SKILL.md": "---\nname: grill-me\ndescription: x\n---\n" },
       "other": { "a.md": "v1\n" },
@@ -166,13 +166,12 @@ describe("addRemoteSkills & library -s filter", () => {
 
     const hostSrc = await makeSkill(path.join(root, "orch"), "my-orchestrator", {
       "modules/intro.md": "custom orchestrator\n",
-      "NOTICE.md": "Adapted from https://github.com/mattpocock/skills and file credits.\nIgnore prose owner/word mentions.\n",
+      "NOTICE.md": "Adapted from https://github.com/mattpocock/skills (MIT attribution only).\n",
       "_archive/nested/SKILL.md": "---\nname: nested\ndescription: x\nrepository: softaworks/agent-toolkit\nsubpath: skills/nested\n---\n",
     });
 
     const upstreams = await discoverSkillUpstreams("my-orchestrator", hostSrc);
     expect(upstreams).toEqual([
-      { url: "https://github.com/mattpocock/skills.git", subpath: "", commit: "" },
       { url: "https://github.com/softaworks/agent-toolkit.git", subpath: "skills/nested", commit: "" },
     ]);
 

@@ -109,9 +109,9 @@ export async function copyIntoHub(
   const staging = path.join(hub.tmpDir, `${name}.${randomBytes(6).toString("hex")}`);
   await fs.cp(source, staging, { recursive: true, errorOnExist: true, force: false });
   try {
-    await fs.rename(staging, dest);
+    await renameWithRetry(staging, dest);
   } catch (err) {
-    await fs.rm(staging, { recursive: true, force: true });
+    await fs.rm(staging, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
     throw err;
   }
 

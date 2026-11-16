@@ -10,7 +10,7 @@
 - **GitHub & git remotes (`add owner/repo [-s skill]`)**: add or attach skills from `owner/repo[@ref]`, GitHub `/tree/<ref>/<subpath>` URLs, and git URLs into `<hub>/remotes/`, filter skills with `-s`, and keep existing agent assignments when attaching tracking to hub skills.
 - **`skillsym update [skill...] [--dry-run]`**: explicitly fetch and update GitHub-tracked and local-git skills with backups before every overwrite, local-edit conflict detection (`overwrite` / `keep`), `upstream-missing` safety, and automatic `skills-json` refresh (`status` and `check` stay 100% offline).
 - **Automatic origin discovery**: `add`, `import`, and lazy backfill in `update` auto-detect upstream URLs/subpaths from `~/.agents/.skill-lock.json` (`npx skills`), `SKILL.md` frontmatter (`repository`), and local git `origin` remotes; local `.git` repos without an `origin` remain `local-only` unless local source files changed.
-- **Orchestrator watch-and-diff (`upstreams[]`)**: `skillsym add <repo> [-s <skill>] --upstream <orchestrator>` (plus automatic discovery from `NOTICE.md` links and nested `_archive/*/SKILL.md` folders) watches upstream repos without ever altering adapted orchestrator files; `skillsym update` diffs scoped subpaths and offers `[m] mark-reviewed` / `--mark-reviewed`.
+- **Orchestrator watch-and-diff (`upstreams[]`)**: `skillsym add <repo> [-s <skill>] --upstream <orchestrator>` (plus automatic discovery from nested `_archive/*/SKILL.md` folders, leaving `NOTICE.md` attribution untouched) watches upstream repos without ever altering adapted orchestrator files; `skillsym update` diffs scoped subpaths and offers `[m] mark-reviewed` / `--mark-reviewed`.
 
 ## 0.1.0 — 2026-11-02
 

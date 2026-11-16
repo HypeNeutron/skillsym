@@ -817,16 +817,14 @@ export async function discoverSkillOrigin(
   return null;
 }
 
-const GITHUB_URL_IN_TEXT_RE = /https:\/\/github\.com\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+(?:\/tree\/[A-Za-z0-9_.~/%-]+)?/gi;
-
 function upstreamKey(u: RemoteSkillInfo): string {
   return `${u.url}\0${u.ref ?? ""}\0${u.subpath}`;
 }
 
 /**
- * Offline discovery of multiple upstream sources referenced by a combined/orchestrator skill:
- * scans `NOTICE.md` for explicit GitHub URLs and nested sub-skill folders (e.g. `_archive/* /SKILL.md`)
- * via `discoverSkillOrigin`. Never overwrites or modifies hub files.
+ * Offline discovery of nested upstream sub-skill folders inside a combined/orchestrator skill
+ * (e.g. `_archive/* /SKILL.md` with frontmatter `repository:` or `.skill-lock.json` entries).
+ * Does not treat attribution files like `NOTICE.md` as live upstream dependencies.
  */
 export async function discoverSkillUpstreams(
   _skillName: string,
@@ -843,30 +841,7 @@ export async function discoverSkillUpstreams(
     found.push(info);
   };
 
-  // 1. Explicit https://github.com/<owner>/<repo> links in NOTICE.md.
-  try {
-    const notice = await fs.readFile(path.join(skillDir, "NOTICE.md"), "utf8");
-    for (const m of notice.matchAll(GITHUB_URL_IN_TEXT_RE)) {
-      const cleaned = m[0]!.replace(/[.,;:)>]+$/, "");
-      try {
-        const parsed = parseRemoteSpec(cleaned);
-        if (parsed) {
-          add({
-            url: parsed.url,
-            ...(parsed.ref ? { ref: parsed.ref } : {}),
-            subpath: parsed.subpath,
-            commit: "",
-          });
-        }
-      } catch {
-        // Ignore malformed links in prose.
-      }
-    }
-  } catch {
-    // NOTICE.md is optional.
-  }
-
-  // 2. Nested child sub-skills (e.g. `_archive/00-start-here/SKILL.md`), excluding root SKILL.md.
+  // Scan nested child sub-skills (e.g. `_archive/00-start-here/SKILL.md`), excluding root SKILL.md.
   async function walkNested(dir: string, depth: number): Promise<void> {
     if (depth > 0 && (await isFile(path.join(dir, "SKILL.md")))) {
       add(
