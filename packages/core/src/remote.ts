@@ -97,6 +97,12 @@ export async function parseRemoteTarget(input: string, cwd: string = process.cwd
     if (await pathExists(path.resolve(cwd, trimmed))) return null;
   }
 
+  return parseRemoteSpec(trimmed);
+}
+
+/** Pure parser for GitHub/git specifiers without local filesystem disambiguation. */
+function parseRemoteSpec(trimmed: string): ParsedRemoteTarget | null {
+
   // SSH shorthand: git@host:owner/repo(.git)(#ref)
   const sshMatch = SSH_RE.exec(trimmed);
   if (sshMatch) {
@@ -615,4 +621,198 @@ export async function inspectLocalGitSource(dir: string, git: GitRunner = runGit
     url = undefined;
   }
   return { root, ...(url ? { url } : {}), commit, subpath: toPosixPath(path.relative(root, absDir)) };
+}
+
+export interface DiscoverOriginOptions {
+  /** Original source directory where the skill came from (if known). */
+  sourceDir?: string;
+  /** Hub used to infer `<hub>/../.agents/.skill-lock.json` cleanly in isolated tests and real runs. */
+  hub?: Hub;
+  /** Explicit user home directory for finding `~/.agents/.skill-lock.json`. */
+  homedir?: string;
+  /** Agent profiles used to locate `.skill-lock.json` / `skills-lock.json` next to agent folders. */
+  profiles?: AgentProfile[];
+  git?: GitRunner;
+}
+
+function unquoteYaml(val: string): string {
+  const t = val.trim();
+  if ((t.startsWith('"') && t.endsWith('"')) || (t.startsWith("'") && t.endsWith("'"))) {
+    return t.slice(1, -1).trim();
+  }
+  return t;
+}
+
+function normalizeSkillSubpath(raw: string | undefined): string | undefined {
+  if (!raw) return undefined;
+  let cleaned = raw.trim().replace(/\\/g, "/").replace(/^\.\//, "").replace(/^\/+|\/+$/g, "");
+  if (!cleaned || cleaned === "." || cleaned === "SKILL.md") return "";
+  if (cleaned.endsWith("/SKILL.md")) cleaned = cleaned.slice(0, -"/SKILL.md".length);
+  return cleaned === "." ? "" : cleaned;
+}
+
+function parseFrontmatterOrigin(rawMd: string): { repo?: string; subpath?: string; ref?: string } | null {
+  const fmMatch = /^(?:\uFEFF)?---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/.exec(rawMd);
+  if (!fmMatch) return null;
+
+  const fields = new Map<string, string>();
+  let section: string | undefined;
+  for (const line of fmMatch[1]!.split(/\r?\n/)) {
+    if (!line.trim() || line.trim().startsWith("#")) continue;
+    const indent = line.length - line.trimStart().length;
+    const kv = /^\s*([A-Za-z0-9_-]+)\s*:\s*(.*)$/.exec(line);
+    if (!kv) {
+      if (indent === 0) section = undefined;
+      continue;
+    }
+    const key = kv[1]!.toLowerCase();
+    const val = unquoteYaml(kv[2]!);
+    if (indent === 0) {
+      section = val ? undefined : key;
+      if (val) fields.set(key, val);
+    } else if (section && val) {
+      fields.set(`${section}.${key}`, val);
+    }
+  }
+
+  const repo =
+    fields.get("repository") ??
+    fields.get("sourceurl") ??
+    fields.get("metadata.repository") ??
+    fields.get("metadata.sourceurl") ??
+    fields.get("source") ??
+    fields.get("metadata.source");
+  if (!repo) return null;
+
+  const subpath = normalizeSkillSubpath(
+    fields.get("subpath") ?? fields.get("skillpath") ?? fields.get("metadata.subpath") ?? fields.get("metadata.skillpath"),
+  );
+  const ref = fields.get("ref") ?? fields.get("branch") ?? fields.get("metadata.ref") ?? fields.get("metadata.branch");
+  return { repo, ...(subpath !== undefined ? { subpath } : {}), ...(ref ? { ref } : {}) };
+}
+
+function lockfileCandidateDirs(options: DiscoverOriginOptions): string[] {
+  const dirs: string[] = [];
+  const add = (p: string | undefined) => {
+    if (!p) return;
+    const resolved = path.resolve(p);
+    if (!dirs.some((d) => samePath(d, resolved))) dirs.push(resolved);
+  };
+
+  if (options.sourceDir) {
+    let cur = path.dirname(path.resolve(options.sourceDir));
+    for (let i = 0; i < 4; i++) {
+      add(cur);
+      const parent = path.dirname(cur);
+      if (parent === cur) break;
+      cur = parent;
+    }
+  }
+  if (options.homedir) {
+    add(path.join(options.homedir, ".agents"));
+    add(options.homedir);
+  }
+  for (const p of options.profiles ?? []) {
+    add(path.dirname(p.skillsDir));
+    add(p.skillsDir);
+    for (const r of p.alsoReads) add(path.dirname(r));
+  }
+  if (options.hub) {
+    add(path.join(path.dirname(options.hub.home), ".agents"));
+  }
+  return dirs;
+}
+
+async function discoverFromLockfiles(skillName: string, options: DiscoverOriginOptions): Promise<RemoteSkillInfo | null> {
+  for (const dir of lockfileCandidateDirs(options)) {
+    for (const file of [".skill-lock.json", "skills-lock.json"]) {
+      let raw: string;
+      try {
+        raw = await fs.readFile(path.join(dir, file), "utf8");
+      } catch {
+        continue;
+      }
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(raw);
+      } catch {
+        continue;
+      }
+      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) continue;
+      const skillsObj = (parsed as { skills?: Record<string, unknown> }).skills;
+      const entry = skillsObj && typeof skillsObj === "object" ? skillsObj[skillName] : undefined;
+      if (!entry || typeof entry !== "object" || Array.isArray(entry)) continue;
+
+      const rec = entry as Record<string, unknown>;
+      const rawUrl =
+        (typeof rec.sourceUrl === "string" && rec.sourceUrl.trim()) ||
+        ((rec.sourceType === "github" || (typeof rec.source === "string" && rec.source.includes("/"))) &&
+          typeof rec.source === "string" &&
+          rec.source.trim()) ||
+        "";
+      if (!rawUrl) continue;
+
+      let target: ParsedRemoteTarget | null = null;
+      try {
+        target = parseRemoteSpec(rawUrl);
+      } catch {
+        target = null;
+      }
+      if (!target) continue;
+
+      const subpath =
+        typeof rec.skillPath === "string" ? (normalizeSkillSubpath(rec.skillPath) ?? target.subpath) : target.subpath;
+      const ref =
+        (typeof rec.ref === "string" && rec.ref.trim()) ||
+        (typeof rec.branch === "string" && rec.branch.trim()) ||
+        target.ref;
+      return { url: target.url, ...(ref ? { ref } : {}), subpath, commit: "" };
+    }
+  }
+  return null;
+}
+
+/**
+ * Offline auto-discovery of a skill's online origin from `SKILL.md` frontmatter, `npx skills`
+ * lockfiles (`.skill-lock.json` / `skills-lock.json`), or a local git repo's `origin` remote.
+ */
+export async function discoverSkillOrigin(
+  skillName: string,
+  skillDir: string,
+  options: DiscoverOriginOptions = {},
+): Promise<RemoteSkillInfo | null> {
+  // 1. Check SKILL.md YAML frontmatter (`repository`, `sourceUrl`, `source`).
+  try {
+    const rawMd = await fs.readFile(path.join(skillDir, "SKILL.md"), "utf8");
+    const fm = parseFrontmatterOrigin(rawMd);
+    if (fm?.repo) {
+      let target: ParsedRemoteTarget | null = null;
+      try {
+        target = parseRemoteSpec(fm.repo);
+      } catch {
+        target = null;
+      }
+      if (target) {
+        const ref = fm.ref ?? target.ref;
+        const subpath = fm.subpath ?? target.subpath;
+        return { url: target.url, ...(ref ? { ref } : {}), subpath, commit: "" };
+      }
+    }
+  } catch {
+    // Missing or unreadable SKILL.md falls through to lockfiles / git origin.
+  }
+
+  // 2. Check `.skill-lock.json` / `skills-lock.json` near sourceDir, profiles, homedir, or hub parent.
+  const fromLock = await discoverFromLockfiles(skillName, options);
+  if (fromLock) return fromLock;
+
+  // 3. Check if `sourceDir` sits inside a local git checkout with a configured `origin` remote URL.
+  if (options.sourceDir) {
+    const localGit = await inspectLocalGitSource(options.sourceDir, options.git);
+    if (localGit?.url) {
+      return { url: localGit.url, subpath: localGit.subpath, commit: localGit.commit };
+    }
+  }
+
+  return null;
 }

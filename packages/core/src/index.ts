@@ -154,6 +154,7 @@ export {
 export {
   parseRemoteTarget,
   syncRemoteClone,
+  discoverSkillOrigin,
   planRemoteAdd,
   addRemoteSkills,
   inspectLocalGitSource,
@@ -161,6 +162,7 @@ export {
   slugForRemote,
   toPosixPath,
   type ParsedRemoteTarget,
+  type DiscoverOriginOptions,
   type GitRunner,
   type RemoteSyncOptions,
   type RemoteSyncResult,

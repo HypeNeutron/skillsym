@@ -10,6 +10,7 @@ import type { Hub } from "./hub.js";
 import { createDirLink, readLinkTarget } from "./links.js";
 import { withLock, type LockOptions } from "./lock.js";
 import { readManifest, writeManifest } from "./manifest.js";
+import { discoverSkillOrigin, type GitRunner } from "./remote.js";
 import { expandSkillNames, isValidSkillName } from "./skills.js";
 import { applySkillsJsonDelivery } from "./skills-json.js";
 import { readState, samePath, writeState } from "./state.js";
@@ -66,6 +67,7 @@ export interface ImportOptions {
   skills?: string[];
   /** Only copies found in these agents' folders. Other agents' copies are not compared or touched. */
   agents?: string[];
+  git?: GitRunner;
   lock?: LockOptions;
 }
 
@@ -179,7 +181,7 @@ export async function importSkills(hub: Hub, options: ImportOptions = {}): Promi
         results.push(result);
         if (item.type !== "import" && item.type !== "link-existing") continue;
         try {
-          await importOne(hub, profiles, item, result, stamp);
+          await importOne(hub, profiles, item, result, stamp, options.git);
         } catch (err) {
           result.ok = false;
           result.error = (err as Error).message;
@@ -191,19 +193,45 @@ export async function importSkills(hub: Hub, options: ImportOptions = {}): Promi
   );
 }
 
-async function importOne(hub: Hub, profiles: AgentProfile[], item: ImportItem, result: ImportItemResult, stamp: string): Promise<void> {
-  if (item.type === "import") await placeInHub(hub, item.name, item.sources[0]!.path);
+async function importOne(
+  hub: Hub,
+  profiles: AgentProfile[],
+  item: ImportItem,
+  result: ImportItemResult,
+  stamp: string,
+  git?: GitRunner,
+): Promise<void> {
+  if (item.type === "import") await placeInHub(hub, item.name, item.sources[0]!.path, { profiles, git });
   await assignInManifest(hub, item.name, item.sources.flatMap((s) => s.agents));
   await replaceWithLinks(hub, profiles, item.name, item.sources, result, stamp);
 }
 
 /** Copy `from` into the hub as `skill` (staged, then renamed) and add a manifest entry if missing. */
-export async function placeInHub(hub: Hub, skill: string, from: string): Promise<void> {
+export async function placeInHub(
+  hub: Hub,
+  skill: string,
+  from: string,
+  options: { profiles?: AgentProfile[]; git?: GitRunner } = {},
+): Promise<void> {
+  const dest = path.join(hub.skillsDir, skill);
   const staging = path.join(hub.tmpDir, `${skill}.${randomBytes(6).toString("hex")}`);
   await fs.cp(from, staging, { recursive: true, errorOnExist: true });
-  await fs.rename(staging, path.join(hub.skillsDir, skill));
+  await fs.rename(staging, dest);
+  const discoveredRemote = await discoverSkillOrigin(skill, dest, { sourceDir: from, hub, profiles: options.profiles, git: options.git });
   const manifest = await readManifest(hub.manifestPath);
-  manifest.skills[skill] ??= { agents: [], mode: "link", scope: "user" };
+  const existing = manifest.skills[skill];
+  if (!existing) {
+    manifest.skills[skill] = {
+      agents: [],
+      mode: "link",
+      scope: "user",
+      source: from,
+      sourceHash: await hashSkillDir(dest),
+      ...(discoveredRemote ? { remote: discoveredRemote } : {}),
+    };
+  } else if (!existing.remote && discoveredRemote) {
+    existing.remote = discoveredRemote;
+  }
   await writeManifest(hub.manifestPath, manifest);
 }
 

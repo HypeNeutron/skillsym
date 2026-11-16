@@ -9,6 +9,7 @@
 - **`skillsym migrate`**: guided migration (with backups) from legacy `config.json` `gemini` overrides, owned junctions in `~/.gemini/config/skills`, and broad `skills.json` entries to built-in `antigravity`.
 - **GitHub & git remotes (`add owner/repo [-s skill]`)**: add or attach skills from `owner/repo[@ref]`, GitHub `/tree/<ref>/<subpath>` URLs, and git URLs into `<hub>/remotes/`, filter skills with `-s`, and keep existing agent assignments when attaching tracking to hub skills.
 - **`skillsym update [skill...] [--dry-run]`**: explicitly fetch and update GitHub-tracked and local-git skills with backups before every overwrite, local-edit conflict detection (`overwrite` / `keep`), `upstream-missing` safety, and automatic `skills-json` refresh (`status` and `check` stay 100% offline).
+- **Automatic origin discovery**: `add`, `import`, and lazy backfill in `update` auto-detect upstream URLs/subpaths from `~/.agents/.skill-lock.json` (`npx skills`), `SKILL.md` frontmatter (`repository`), and local git `origin` remotes; local `.git` repos without an `origin` remain `local-only` unless local source files changed.
 
 ## 0.1.0 — 2026-11-02
 

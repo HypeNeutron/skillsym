@@ -143,7 +143,7 @@ async function choosePrimary(
       const replaced = await replaceHubVersion(hub, item.name, chosen.path);
       result.backups.push(...replaced.backups);
       if (replaced.library) result.library = replaced.library;
-    } else await placeInHub(hub, item.name, chosen.path);
+    } else await placeInHub(hub, item.name, chosen.path, { profiles });
   }
   await assignInManifest(hub, item.name, item.sources.flatMap((s) => s.agents));
   await replaceWithLinks(hub, profiles, item.name, item.sources, result);
@@ -163,7 +163,7 @@ async function keepBoth(hub: Hub, profiles: AgentProfile[], item: ImportItem, ve
       taken.add(name);
       result.newSkills.push(name);
     }
-    if (version.label !== "hub") await placeInHub(hub, name, version.path);
+    if (version.label !== "hub") await placeInHub(hub, name, version.path, { profiles });
     const sources = item.sources.filter((s) => s.hash === version.hash);
     await assignInManifest(hub, name, sources.flatMap((s) => s.agents));
     await replaceWithLinks(hub, profiles, name, sources, result);

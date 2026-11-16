@@ -435,7 +435,7 @@ async function run(argv: string[], io: Io, json: boolean): Promise<ExitCode> {
         // Validate explicit `-s` when pointing directly at a single skill directory.
         await planLibraryAdd(hub, target, { skills: values.skill });
       }
-      const skill = await addSkill(hub, target);
+      const skill = await addSkill(hub, target, { profiles });
       if (!agents.length) {
         if (json) io.stdout(JSON.stringify({ added: skill }));
         else io.stdout(`Added "${skill.name}" to the hub (${skill.path}).`);

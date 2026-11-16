@@ -9,6 +9,7 @@ import { hashSkillDir } from "./hash.js";
 import { createDirLink, readLinkTarget, removeDirLink } from "./links.js";
 import { withLock, type LockOptions } from "./lock.js";
 import { readManifest, writeManifest, type Manifest } from "./manifest.js";
+import { discoverSkillOrigin, type GitRunner } from "./remote.js";
 import { copyIntoHub, expandSkillNames, isValidSkillName, type SkillInfo } from "./skills.js";
 import { refreshSkillsJsonManifests } from "./skills-json.js";
 import { refreshLibrarySnapshots } from "./snapshots.js";
@@ -80,6 +81,7 @@ export interface LibraryOptions {
   /** Only add/inspect these skill names or glob patterns (`*`, `?`). */
   skills?: string[];
   profiles?: AgentProfile[];
+  git?: GitRunner;
   lock?: LockOptions;
 }
 
@@ -168,9 +170,12 @@ export async function addLibrary(hub: Hub, libraryPath: string, options: Library
       const snapshotFailed: string[] = [];
       const stamp = backupStamp();
       for (const item of plan.items) {
-        if (item.type === "add") added.push(plan.link ? await linkIntoHub(hub, item.name, item.path) : await copyIntoHub(hub, item.name, item.path));
-        else if (item.type === "repoint") added.push(await repoint(hub, item.name, item.path));
-        else if (item.type === "adopt") added.push(await adopt(hub, item, stamp));
+        if (item.type === "add") {
+          added.push(
+            plan.link ? await linkIntoHub(hub, item.name, item.path, options) : await copyIntoHub(hub, item.name, item.path, options),
+          );
+        } else if (item.type === "repoint") added.push(await repoint(hub, item.name, item.path));
+        else if (item.type === "adopt") added.push(await adopt(hub, item, stamp, options));
       }
       // A library none of whose skills came through is not in use: there is nothing to remember.
       if (plan.link && plan.items.some((i) => i.type !== "skip")) {
@@ -239,18 +244,26 @@ export function forgetLibrarySkill(manifest: Manifest, name: string): void {
  * Make `<hub>/skills/<name>` a link to a folder in the user's library. Agents then reach the library
  * through the hub (agent -> hub -> library), so editing the library is enough.
  */
-async function linkIntoHub(hub: Hub, name: string, source: string): Promise<SkillInfo> {
+async function linkIntoHub(hub: Hub, name: string, source: string, options: LibraryOptions = {}): Promise<SkillInfo> {
   const dest = path.join(hub.skillsDir, name);
   await createDirLink(source, dest);
+  const discoveredRemote = await discoverSkillOrigin(name, source, { sourceDir: source, hub, profiles: options.profiles, git: options.git });
   const manifest = await readManifest(hub.manifestPath);
-  manifest.skills[name] = { agents: [], mode: "source-link", scope: "user", source, sourceHash: await hashSkillDir(source) };
+  manifest.skills[name] = {
+    agents: [],
+    mode: "source-link",
+    scope: "user",
+    source,
+    sourceHash: await hashSkillDir(source),
+    ...(discoveredRemote ? { remote: discoveredRemote } : {}),
+  };
   try {
     await writeManifest(hub.manifestPath, manifest);
   } catch (err) {
     await removeDirLink(dest);
     throw err;
   }
-  return { name, path: dest, agents: [], mode: "source-link", scope: "user" };
+  return { name, path: dest, agents: [], mode: "source-link", scope: "user", ...(discoveredRemote ? { remote: discoveredRemote } : {}) };
 }
 
 /** Point an existing linked skill at its library folder's new location; agents' links are unaffected. */
@@ -258,7 +271,7 @@ async function linkIntoHub(hub: Hub, name: string, source: string): Promise<Skil
  * Swap the hub's own copy for a link to the library. Agents link to the hub path, which stays the same,
  * so they need no change. The copy goes to backups, and comes back if the link cannot be made.
  */
-async function adopt(hub: Hub, item: LibraryItem, stamp: string): Promise<SkillInfo> {
+async function adopt(hub: Hub, item: LibraryItem, stamp: string, options: LibraryOptions = {}): Promise<SkillInfo> {
   const dest = path.join(hub.skillsDir, item.name);
   const backup = await moveToBackup(hub, dest, "library-adopt", item.name, stamp);
   try {
@@ -268,13 +281,20 @@ async function adopt(hub: Hub, item: LibraryItem, stamp: string): Promise<SkillI
     throw err;
   }
   item.backup = backup;
+  const discoveredRemote = await discoverSkillOrigin(item.name, item.path, {
+    sourceDir: item.path,
+    hub,
+    profiles: options.profiles,
+    git: options.git,
+  });
   const manifest = await readManifest(hub.manifestPath);
   const entry = manifest.skills[item.name]!;
   entry.mode = "source-link";
   entry.source = item.path;
   entry.sourceHash = await hashSkillDir(item.path);
+  if (!entry.remote && discoveredRemote) entry.remote = discoveredRemote;
   await writeManifest(hub.manifestPath, manifest);
-  return { name: item.name, path: dest, agents: [...entry.agents], mode: "source-link", scope: "user" };
+  return { name: item.name, path: dest, agents: [...entry.agents], mode: "source-link", scope: "user", ...(entry.remote ? { remote: entry.remote } : {}) };
 }
 
 async function repoint(hub: Hub, name: string, source: string): Promise<SkillInfo> {

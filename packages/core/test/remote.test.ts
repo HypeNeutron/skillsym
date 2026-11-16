@@ -3,7 +3,11 @@ import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
+  addSkill,
+  builtinAgents,
+  discoverSkillOrigin,
   emptyManifest,
+  importSkills,
   inspectLocalGitSource,
   openHub,
   parseRemoteTarget,
@@ -167,5 +171,64 @@ describe("syncRemoteClone & inspectLocalGitSource", () => {
 
     const plainDir = await makeSkill(path.join(root, "plain"), "beta");
     expect(await inspectLocalGitSource(plainDir)).toBeNull();
+  });
+});
+
+describe("discoverSkillOrigin & add/import auto-detection", () => {
+  it("extracts origin from SKILL.md frontmatter and .skill-lock.json, ignoring plain non-URL metadata", async () => {
+    const plainMetaDir = path.join(root, "plain-meta", "datacloud");
+    await fs.mkdir(plainMetaDir, { recursive: true });
+    await fs.writeFile(
+      path.join(plainMetaDir, "SKILL.md"),
+      "---\nname: datacloud\ndescription: x\nmetadata:\n  publisher: google\n---\n",
+    );
+    expect(await discoverSkillOrigin("datacloud", plainMetaDir)).toBeNull();
+
+    const fmDir = path.join(root, "fm-skill", "web-tools");
+    await fs.mkdir(fmDir, { recursive: true });
+    await fs.writeFile(
+      path.join(fmDir, "SKILL.md"),
+      "---\nname: web-tools\ndescription: x\nmetadata:\n  repository: https://github.com/org/repo\n  skillPath: skills/web-tools/SKILL.md\n  ref: main\n---\n",
+    );
+    expect(await discoverSkillOrigin("web-tools", fmDir)).toEqual({
+      url: "https://github.com/org/repo.git",
+      ref: "main",
+      subpath: "skills/web-tools",
+      commit: "",
+    });
+
+    const userHome = path.join(root, "user");
+    await fs.mkdir(path.join(userHome, ".agents", "skills"), { recursive: true });
+    await fs.mkdir(path.join(userHome, ".claude", "skills"), { recursive: true });
+    const repoUrl = pathToFileURL(path.join(root, "upstream")).toString();
+    await fs.writeFile(
+      path.join(userHome, ".agents", ".skill-lock.json"),
+      JSON.stringify({
+        version: 3,
+        skills: {
+          imported: {
+            source: "owner/repo",
+            sourceType: "github",
+            sourceUrl: repoUrl,
+            skillPath: "skills/imported/SKILL.md",
+          },
+        },
+      }),
+    );
+    await makeSkill(path.join(userHome, ".claude", "skills"), "imported", { "a.md": "v1\n" });
+    await importSkills(hub, { profiles: builtinAgents(userHome) });
+
+    const manifest = await readManifest(hub.manifestPath);
+    expect(manifest.skills["imported"]?.remote).toEqual({ url: repoUrl, subpath: "skills/imported", commit: "" });
+    expect(manifest.skills["imported"]?.sourceHash).toBeTruthy();
+
+    await addSkill(hub, fmDir);
+    const updatedManifest = await readManifest(hub.manifestPath);
+    expect(updatedManifest.skills["web-tools"]?.remote).toEqual({
+      url: "https://github.com/org/repo.git",
+      ref: "main",
+      subpath: "skills/web-tools",
+      commit: "",
+    });
   });
 });

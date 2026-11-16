@@ -184,4 +184,58 @@ describe("updateSkills & planUpdate", () => {
     await addSkill(hub, await makeSkill(path.join(root, "local"), "real"));
     await expect(updateSkills(hub, { skills: ["nope"], profiles })).rejects.toThrow(SkillsymError);
   });
+
+  it("lazy-backfills remote origin from .skill-lock.json during update and persists it", async () => {
+    const repoDir = path.join(root, "upstream");
+    await initRepo(repoDir, { locked: { "doc.md": "v1\n" } });
+    const repoUrl = pathToFileURL(repoDir).toString();
+
+    // Simulate a hub skill added from a stale local copy before `remote` tracking existed.
+    const oldCopy = await makeSkill(path.join(root, "old"), "locked", { "doc.md": "v1\n" });
+    await addSkill(hub, oldCopy);
+    await fs.rm(oldCopy, { recursive: true, force: true });
+
+    await fs.mkdir(path.join(userHome, ".agents"), { recursive: true });
+    await fs.writeFile(
+      path.join(userHome, ".agents", ".skill-lock.json"),
+      JSON.stringify({
+        version: 3,
+        skills: {
+          locked: { source: "owner/repo", sourceType: "github", sourceUrl: repoUrl, skillPath: "skills/locked/SKILL.md" },
+        },
+      }),
+    );
+
+    await fs.writeFile(path.join(repoDir, "skills", "locked", "doc.md"), "v2 upstream\n");
+    const c2 = await commitRepo(repoDir, "v2 locked");
+
+    const preview = await planUpdate(hub, { profiles });
+    expect(preview.items[0]).toMatchObject({ skill: "locked", status: "updated", remoteUrl: repoUrl, newCommit: c2 });
+    expect((await readManifest(hub.manifestPath)).skills["locked"]?.remote).toBeUndefined();
+
+    const applied = await updateSkills(hub, { profiles });
+    expect(applied.items[0]).toMatchObject({ skill: "locked", status: "updated", newCommit: c2 });
+    expect(await fs.readFile(path.join(hub.skillsDir, "locked", "doc.md"), "utf8")).toBe("v2 upstream\n");
+    expect((await readManifest(hub.manifestPath)).skills["locked"]?.remote).toEqual({
+      url: repoUrl,
+      subpath: "skills/locked",
+      commit: c2,
+    });
+  });
+
+  it("reports local git repos without an origin remote as local-only when in sync with hub", async () => {
+    const localRepo = path.join(root, "local-no-origin");
+    await initRepo(localRepo, { localcraft: { "note.md": "v1\n" } });
+    await addSkill(hub, path.join(localRepo, "skills", "localcraft"));
+
+    const res = await planUpdate(hub, { profiles });
+    expect(res.items[0]?.status).toBe("local-only");
+    expect(res.items[0]?.reason).toContain("no origin remote");
+
+    // If local files in that folder change relative to hub, update picks them up cleanly.
+    await fs.writeFile(path.join(localRepo, "skills", "localcraft", "note.md"), "v2 local\n");
+    const updated = await updateSkills(hub, { profiles });
+    expect(updated.items[0]?.status).toBe("updated");
+    expect(await fs.readFile(path.join(hub.skillsDir, "localcraft", "note.md"), "utf8")).toBe("v2 local\n");
+  });
 });

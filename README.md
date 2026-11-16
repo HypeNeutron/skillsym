@@ -349,13 +349,16 @@ skillsym add https://github.com/owner/repo/tree/main/skills/my-skill
 
 - **Attach to existing hub skills:** running `skillsym add <repo> -s <skill>` when `<skill>` is already in your hub
   attaches upstream tracking without wiping its agent assignments.
+- **Automatic origin detection:** `add`, `import` and `update` also detect online origins from `~/.agents/.skill-lock.json`
+  (`npx skills`), `SKILL.md` frontmatter (`repository`), and local git `origin` remotes.
 - **Explicit updates only:** `skillsym status` and `skillsym check` stay offline; run `skillsym update --dry-run` to
   check upstream and `skillsym update` to apply updates. Every updated skill is backed up to `~/.skillsym/backups/` first.
 - **Local-edit safety:** if you edited a skill in `~/.skillsym/skills/` since it was synced, `skillsym update` never
   silently overwrites your changes — it asks whether to **overwrite** (backing up your edits first) or **keep** (`-y` and
   non-interactive runs keep your edits and exit `1`). Skills removed upstream are reported as missing upstream without
   deleting your local copy.
-- **Local git folders:** skills added from a local git repository are also updated by `skillsym update`.
+- **Local git folders:** skills added from a local git repository with an `origin` remote (or whose source folder changed
+  locally) are also updated by `skillsym update`; local `.git` repos without an `origin` stay `local-only` when unchanged.
 
 ## Antigravity and `skills-json` delivery
 

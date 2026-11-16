@@ -1,6 +1,7 @@
 import { randomBytes } from "node:crypto";
 import { promises as fs } from "node:fs";
 import path from "node:path";
+import type { AgentProfile } from "./agents.js";
 import { moveToBackup } from "./backup.js";
 import { SkillsymError } from "./errors.js";
 import { isDirectory, isFile, pathExists, renameWithRetry } from "./fsutil.js";
@@ -8,6 +9,7 @@ import { hashSkillDir } from "./hash.js";
 import type { Hub } from "./hub.js";
 import { withLock, type LockOptions } from "./lock.js";
 import { readManifest, writeManifest, type RemoteSkillInfo, type SkillMode, type SkillScope } from "./manifest.js";
+import { discoverSkillOrigin, type GitRunner } from "./remote.js";
 
 export interface SkillInfo {
   name: string;
@@ -23,6 +25,8 @@ export interface SkillInfo {
 }
 
 export interface AddSkillOptions {
+  profiles?: AgentProfile[];
+  git?: GitRunner;
   lock?: LockOptions;
 }
 
@@ -81,7 +85,7 @@ export async function addSkill(hub: Hub, sourcePath: string, options: AddSkillOp
       if (manifest.skills[name] || (await pathExists(path.join(hub.skillsDir, name)))) {
         throw new SkillsymError("SKILL_EXISTS", `A skill named "${name}" is already in the hub.`, { name });
       }
-      return copyIntoHub(hub, name, source);
+      return copyIntoHub(hub, name, source, options);
     },
     options.lock,
   );
@@ -92,7 +96,12 @@ export async function addSkill(hub: Hub, sourcePath: string, options: AddSkillOp
  * Callers hold the hub lock and have checked the name is free. A failed copy or manifest write
  * leaves the hub as it was.
  */
-export async function copyIntoHub(hub: Hub, name: string, source: string): Promise<SkillInfo> {
+export async function copyIntoHub(
+  hub: Hub,
+  name: string,
+  source: string,
+  options: { profiles?: AgentProfile[]; git?: GitRunner; remote?: RemoteSkillInfo } = {},
+): Promise<SkillInfo> {
   const dest = path.join(hub.skillsDir, name);
   // Stage the copy, then rename into place, so a failed copy never leaves a half skill in the hub.
   const staging = path.join(hub.tmpDir, `${name}.${randomBytes(6).toString("hex")}`);
@@ -104,15 +113,24 @@ export async function copyIntoHub(hub: Hub, name: string, source: string): Promi
     throw err;
   }
 
+  const discoveredRemote =
+    options.remote ?? (await discoverSkillOrigin(name, dest, { sourceDir: source, hub, profiles: options.profiles, git: options.git }));
   const manifest = await readManifest(hub.manifestPath);
-  manifest.skills[name] = { agents: [], mode: "link", scope: "user", source, sourceHash: await hashSkillDir(dest) };
+  manifest.skills[name] = {
+    agents: [],
+    mode: "link",
+    scope: "user",
+    source,
+    sourceHash: await hashSkillDir(dest),
+    ...(discoveredRemote ? { remote: discoveredRemote } : {}),
+  };
   try {
     await writeManifest(hub.manifestPath, manifest);
   } catch (err) {
     await fs.rm(dest, { recursive: true, force: true });
     throw err;
   }
-  return { name, path: dest, agents: [], mode: "link", scope: "user" };
+  return { name, path: dest, agents: [], mode: "link", scope: "user", ...(discoveredRemote ? { remote: discoveredRemote } : {}) };
 }
 
 /**
