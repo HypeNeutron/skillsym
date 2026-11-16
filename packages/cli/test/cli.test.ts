@@ -1027,4 +1027,39 @@ describe("skillsym CLI", () => {
     const listed = JSON.parse(run(["list", "--json"]).stdout).skills.map((s: { name: string }) => s.name);
     expect(listed).toEqual(names);
   });
+
+  it("migrate --dry-run, non-TTY safety, and migrate -y move legacy gemini to antigravity", async () => {
+    await fs.mkdir(home, { recursive: true });
+    await fs.writeFile(
+      path.join(home, "config.json"),
+      JSON.stringify({ version: 1, agents: [{ id: "gemini", skillsDir: "~/.gemini/config/skills" }] }),
+    );
+    await fs.mkdir(path.join(root, "user", ".gemini", "config"), { recursive: true });
+    await fs.writeFile(
+      path.join(root, "user", ".gemini", "config", "skills.json"),
+      JSON.stringify({ entries: [{ path: path.join(home, "skills") }, { path: "~/keep" }] }),
+    );
+    run(["add", await makeSkill(path.join(root, "src"), "coding"), "-a", "gemini"]);
+
+    const dry = run(["migrate", "--dry-run", "--json"]);
+    expect(dry.code).toBe(0);
+    expect(JSON.parse(dry.stdout)).toMatchObject({
+      dryRun: true,
+      needed: true,
+      legacyConfigAgent: true,
+      manifestSkillsToMove: ["coding"],
+    });
+
+    // Without -y in non-TTY, migrate refuses with exit 2 and leaves disk untouched
+    expect(run(["migrate"]).code).toBe(2);
+    expect(await fs.lstat(path.join(root, "user", ".gemini", "config", "skills", "coding"))).toBeDefined();
+
+    const applied = run(["migrate", "-y", "--json"]);
+    expect(applied.code).toBe(0);
+    expect(JSON.parse(applied.stdout)).toMatchObject({ applied: true, unlinkedCount: 1, removedBroadEntries: 1 });
+    expect(run(["check"]).code).toBe(0);
+    expect(JSON.parse(await fs.readFile(path.join(root, "user", ".gemini", "config", "skills.json"), "utf8")).entries).toEqual([
+      { path: "~/keep" },
+    ]);
+  });
 });

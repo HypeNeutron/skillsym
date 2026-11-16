@@ -1,12 +1,13 @@
 import { promises as fs } from "node:fs";
 import path from "node:path";
-import { builtinAgents, planLinkGroups, resolveAgents, type AgentProfile } from "./agents.js";
+import { agentDelivery, builtinAgents, planLinkGroups, resolveAgents, type AgentProfile } from "./agents.js";
 import { SkillsymError } from "./errors.js";
 import { pathExists } from "./fsutil.js";
 import { hashSkillDir } from "./hash.js";
 import type { Hub } from "./hub.js";
 import { createDirLink, readLinkTarget } from "./links.js";
 import { expandSkillNames } from "./skills.js";
+import { applySkillsJsonDelivery, findStateManifest, hasInheritsRef, readGeneratedFile, readTargetSkillsJson } from "./skills-json.js";
 import { withLock, type LockOptions } from "./lock.js";
 import { readManifest, writeManifest } from "./manifest.js";
 import { readState, samePath, writeState } from "./state.js";
@@ -71,6 +72,24 @@ export async function assignSkills(hub: Hub, options: AssignOptions): Promise<As
 
       const results: AgentLinkResult[] = [];
       const requested = agents.map((a) => a.id);
+      const jsonAgents = agents.filter((a) => agentDelivery(a) === "skills-json");
+
+      // Snapshot which requested skills were already delivered cleanly for each skills-json agent
+      // before we mutate manifest/state, so assign reports "already-linked" vs "linked" accurately.
+      const preDelivered = new Map<string, Set<string>>();
+      for (const agent of jsonAgents) {
+        const owned = findStateManifest(state, agent.id);
+        const already = new Set<string>();
+        if (owned && agent.skillsJsonPath) {
+          const gen = await readGeneratedFile(owned.generatedPath);
+          const target = await readTargetSkillsJson(agent.skillsJsonPath).catch(() => null);
+          if (gen.exists && gen.hash === owned.generatedHash && target?.exists && hasInheritsRef(target.rawObj, agent.skillsJsonPath, owned.generatedPath)) {
+            for (const s of owned.skills) already.add(s);
+          }
+        }
+        preDelivered.set(agent.id, already);
+      }
+
       for (const name of skillNames) {
         const target = path.join(hub.skillsDir, name);
         const entry = manifest.skills[name]!;
@@ -130,6 +149,39 @@ export async function assignSkills(hub: Hub, options: AssignOptions): Promise<As
             }
           }
           entry.agents = unique([...entry.agents, ...ids]).sort();
+        }
+      }
+
+      for (const agent of jsonAgents) {
+        const previousAgents = new Map<string, string[]>();
+        for (const name of skillNames) {
+          const entry = manifest.skills[name]!;
+          previousAgents.set(name, [...entry.agents]);
+          entry.agents = unique([...entry.agents, agent.id]).sort();
+        }
+        const applied = await applySkillsJsonDelivery(hub, agent, manifest, state);
+        if (!applied.ok) {
+          for (const name of skillNames) {
+            manifest.skills[name]!.agents = previousAgents.get(name)!;
+            results.push({
+              skill: name,
+              agents: [agent.id],
+              path: applied.skillsJsonPath || agent.skillsDir,
+              outcome: applied.outcome,
+              reason: applied.reason,
+            });
+          }
+          continue;
+        }
+        const already = preDelivered.get(agent.id)!;
+        for (const name of skillNames) {
+          const wasAssigned = previousAgents.get(name)!.includes(agent.id);
+          results.push({
+            skill: name,
+            agents: [agent.id],
+            path: applied.skillsJsonPath,
+            outcome: wasAssigned && already.has(name) ? "already-linked" : "linked",
+          });
         }
       }
 

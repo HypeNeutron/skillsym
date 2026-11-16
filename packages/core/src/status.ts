@@ -1,15 +1,27 @@
 import { promises as fs } from "node:fs";
 import path from "node:path";
-import { builtinAgents, groupBySkillsDir, planLinkGroups, resolveAgents, type AgentProfile } from "./agents.js";
+import { agentDelivery, builtinAgents, groupBySkillsDir, planLinkGroups, resolveAgents, type AgentProfile, type DeliveryMode } from "./agents.js";
+import { readConfig } from "./config.js";
 import { SkillsymError } from "./errors.js";
 import { isDirectory, isFile, isMissing } from "./fsutil.js";
 import { hashSkillDir, hasUtf8Bom } from "./hash.js";
 import type { Hub } from "./hub.js";
 import { readLinkTarget } from "./links.js";
 import { findLibrarySkills, isInGit, isInside } from "./library.js";
-import { readManifest } from "./manifest.js";
+import { readManifest, type Manifest } from "./manifest.js";
+import {
+  computeSkillsJsonEntries,
+  findStateManifest,
+  generatedManifestPath,
+  hasInheritsRef,
+  hashText,
+  readGeneratedFile,
+  readTargetSkillsJson,
+  serializeSkillsJson,
+  type SkillsJsonEntry,
+} from "./skills-json.js";
 import { expandSkillNames, isValidSkillName } from "./skills.js";
-import { readState, samePath, type StateLink } from "./state.js";
+import { readState, samePath, type State, type StateLink } from "./state.js";
 
 export type LinkStatus =
   /** Our link is there and points at the hub skill. */
@@ -45,6 +57,8 @@ export interface StatusEntry {
   linkTarget?: string;
   /** For "covered" and "duplicate": the folder the agent already loads the skill from. */
   coveredBy?: { dir: string; agents: string[] };
+  /** Delivery mechanism for this entry (omitted or "link" for directory links). */
+  delivery?: DeliveryMode;
 }
 
 /** A skill folder in an agent's skills folder that skillsym does not manage. */
@@ -57,7 +71,7 @@ export interface UnmanagedEntry {
 }
 
 export interface StatusWarning {
-  code: "SKILL_MD_BOM" | "UNKNOWN_AGENT_IN_MANIFEST" | "HUB_IN_CLOUD_FOLDER";
+  code: "SKILL_MD_BOM" | "UNKNOWN_AGENT_IN_MANIFEST" | "HUB_IN_CLOUD_FOLDER" | "SKILLS_JSON_BROAD_ENTRY" | "LEGACY_GEMINI_CONFIG" | "SKILLS_JSON_INVALID";
   message: string;
   skill?: string;
   path?: string;
@@ -168,6 +182,9 @@ export async function scanStatus(hub: Hub, options: ScanOptions = {}): Promise<S
     });
   }
 
+  await scanSkillsJsonAgents(hub, profiles, manifest, state, entries, warnings);
+  await warnLegacyGeminiConfig(hub, profiles, warnings);
+
   for (const library of manifest.libraries ?? []) {
     const found = await isDirectory(library);
     const skills = Object.values(manifest.skills).filter((e) => e.mode === "source-link" && e.source && isInside(library, e.source)).length;
@@ -254,7 +271,13 @@ export async function filterStatus(hub: Hub, report: StatusReport, filter: Statu
     }
   }
   const forAgent = (agents: string[], p: string) =>
-    !chosen || chosen.some((a) => agents.includes(a.id) || samePath(a.skillsDir, path.dirname(p)));
+    !chosen ||
+    chosen.some(
+      (a) =>
+        agents.includes(a.id) ||
+        samePath(a.skillsDir, path.dirname(p)) ||
+        (a.skillsJsonPath !== undefined && (samePath(a.skillsJsonPath, p) || p.toLowerCase().startsWith(`${a.skillsJsonPath.toLowerCase()}#`))),
+    );
   return {
     entries: report.entries.filter((e) => (!wanted || wanted.has(e.skill)) && forAgent(e.agents, e.path)),
     unmanaged: report.unmanaged.filter((u) => (!wanted || wanted.has(u.name)) && forAgent(u.agents, u.path)),
@@ -315,4 +338,176 @@ async function hasBom(file: string): Promise<boolean> {
     if (isMissing(err)) return false;
     throw err;
   }
+}
+
+function hasExactGeneratedEntry(text: string, expectedDir: string, folderName: string): boolean {
+  try {
+    const parsed = JSON.parse(text) as { entries?: SkillsJsonEntry[] };
+    if (!parsed || !Array.isArray(parsed.entries)) return false;
+    return parsed.entries.some(
+      (entry) =>
+        typeof entry?.path === "string" &&
+        samePath(path.resolve(entry.path), expectedDir) &&
+        Array.isArray(entry.include_only) &&
+        entry.include_only.includes(folderName),
+    );
+  } catch {
+    return false;
+  }
+}
+
+async function scanSkillsJsonAgents(
+  hub: Hub,
+  profiles: AgentProfile[],
+  manifest: Manifest,
+  state: State,
+  entries: StatusEntry[],
+  warnings: StatusWarning[],
+): Promise<void> {
+  const jsonAgents = profiles.filter((p) => agentDelivery(p) === "skills-json");
+  for (const agent of jsonAgents) {
+    const skillsJsonPath = agent.skillsJsonPath;
+    if (!skillsJsonPath) continue;
+    const generatedPath = generatedManifestPath(hub, agent.id);
+    const owned = findStateManifest(state, agent.id);
+    const assignedSkills = Object.keys(manifest.skills)
+      .sort()
+      .filter((name) => manifest.skills[name]!.agents.includes(agent.id));
+
+    let targetRaw: Record<string, unknown> = {};
+    let targetExists = false;
+    let targetInvalid: string | undefined;
+    try {
+      const t = await readTargetSkillsJson(skillsJsonPath);
+      targetExists = t.exists;
+      targetRaw = t.rawObj;
+    } catch (err) {
+      targetInvalid = (err as Error).message;
+      warnings.push({ code: "SKILLS_JSON_INVALID", message: targetInvalid, path: skillsJsonPath });
+    }
+
+    if (targetExists && Array.isArray(targetRaw.entries)) {
+      const agyDefault = profiles.find((p) => p.id === "universal")?.skillsDir;
+      const broadPaths: string[] = [];
+      for (const item of targetRaw.entries) {
+        if (typeof item !== "object" || item === null) continue;
+        const rec = item as Record<string, unknown>;
+        if (typeof rec.path !== "string" || rec.include_only !== undefined || rec.exclude !== undefined) continue;
+        const resolved = path.resolve(path.dirname(skillsJsonPath), rec.path);
+        if (samePath(resolved, hub.skillsDir) || (agyDefault && samePath(resolved, agyDefault))) {
+          broadPaths.push(rec.path);
+        }
+      }
+      if (broadPaths.length) {
+        warnings.push({
+          code: "SKILLS_JSON_BROAD_ENTRY",
+          message: `${skillsJsonPath} lists whole-folder entry (${broadPaths.join(", ")}) without include_only, which bypasses skillsym filtering; run \`skillsym migrate\` to clean it up.`,
+          path: skillsJsonPath,
+        });
+      }
+    }
+
+    const gen = await readGeneratedFile(generatedPath);
+    const hasInherits = targetExists && hasInheritsRef(targetRaw, skillsJsonPath, generatedPath);
+
+    if (!assignedSkills.length && !owned && !gen.exists && !hasInherits) continue;
+
+    const desired = await computeSkillsJsonEntries(hub, manifest, agent.id);
+    const desiredHash = hashText(serializeSkillsJson(desired.entries));
+    const genChangedExternally = gen.exists && (!owned || gen.hash !== owned.generatedHash);
+
+    for (const name of assignedSkills) {
+      if (desired.missingSourceSkills.includes(name)) {
+        entries.push({
+          skill: name,
+          agents: [agent.id],
+          path: `${skillsJsonPath}#${name}`,
+          status: "source-missing",
+          owned: Boolean(owned?.skills.includes(name)),
+          delivery: "skills-json",
+        });
+        continue;
+      }
+      if (targetInvalid) {
+        entries.push({
+          skill: name,
+          agents: [agent.id],
+          path: skillsJsonPath,
+          status: "blocked",
+          owned: Boolean(owned),
+          delivery: "skills-json",
+        });
+        continue;
+      }
+      if (genChangedExternally) {
+        entries.push({
+          skill: name,
+          agents: [agent.id],
+          path: skillsJsonPath,
+          status: "replaced",
+          owned: Boolean(owned),
+          sameContent: gen.hash === desiredHash,
+          delivery: "skills-json",
+        });
+        continue;
+      }
+      const entry = manifest.skills[name]!;
+      const expectedDir = entry.mode === "source-link" && entry.source ? path.dirname(entry.source) : hub.skillsDir;
+      const folderName = entry.mode === "source-link" && entry.source ? path.basename(entry.source) : name;
+      const inGen = Boolean(gen.exists && hasExactGeneratedEntry(gen.text, expectedDir, folderName));
+      if (!gen.exists || !hasInherits || !inGen || gen.hash !== desiredHash) {
+        const wasDelivered = Boolean(owned?.skills.includes(name));
+        const deletedByUser = wasDelivered && (!gen.exists || !hasInherits);
+        if (hasInherits && gen.exists && inGen && gen.hash === owned?.generatedHash) {
+          entries.push({ skill: name, agents: [agent.id], path: skillsJsonPath, status: "synced", owned: true, delivery: "skills-json" });
+        } else {
+          entries.push({
+            skill: name,
+            agents: [agent.id],
+            path: skillsJsonPath,
+            status: "missing",
+            owned: deletedByUser,
+            delivery: "skills-json",
+          });
+        }
+        continue;
+      }
+      entries.push({ skill: name, agents: [agent.id], path: skillsJsonPath, status: "synced", owned: true, delivery: "skills-json" });
+    }
+
+    const orphanedSkills = (owned?.skills ?? []).filter((s) => !assignedSkills.includes(s));
+    if (orphanedSkills.length) {
+      for (const s of orphanedSkills) {
+        entries.push({ skill: s, agents: [], path: skillsJsonPath, status: "orphaned", owned: true, delivery: "skills-json" });
+      }
+    } else if (!assignedSkills.length && (owned || gen.exists || hasInherits)) {
+      entries.push({ skill: "(skills-json)", agents: [], path: skillsJsonPath, status: "orphaned", owned: Boolean(owned), delivery: "skills-json" });
+    }
+  }
+}
+
+async function warnLegacyGeminiConfig(hub: Hub, profiles: AgentProfile[], warnings: StatusWarning[]): Promise<void> {
+  const antigravity = profiles.find((p) => p.id === "antigravity");
+  if (!antigravity) return;
+  let config;
+  try {
+    config = await readConfig(hub.configPath);
+  } catch {
+    return;
+  }
+  const legacy = config.agents.find((a) => a.id === "gemini" && samePath(path.resolve(path.dirname(antigravity.skillsDir), path.basename(antigravity.skillsDir)), expandHome(a.skillsDir, antigravity.skillsDir)));
+  if (legacy) {
+    warnings.push({
+      code: "LEGACY_GEMINI_CONFIG",
+      message: `${hub.configPath} maps "gemini" to Antigravity's skills folder (${legacy.skillsDir}); run \`skillsym migrate\` to switch to built-in "antigravity" (skills-json delivery).`,
+      path: hub.configPath,
+    });
+  }
+}
+
+function expandHome(p: string, antigravitySkillsDir: string): string {
+  const home = path.resolve(antigravitySkillsDir, "..", "..", "..");
+  if (p === "~") return home;
+  if (p.startsWith("~/") || p.startsWith("~\\")) return path.join(home, p.slice(2));
+  return path.resolve(home, p);
 }

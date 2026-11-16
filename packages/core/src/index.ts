@@ -11,21 +11,36 @@ export {
   type SkillMode,
   type SkillScope,
 } from "./manifest.js";
-export { STATE_VERSION, readState, writeState, type State, type StateLink, type LinkKind } from "./state.js";
+export { STATE_VERSION, readState, writeState, type State, type StateLink, type StateManifest, type LinkKind } from "./state.js";
 export { withLock, type LockOptions } from "./lock.js";
 export { hasLibrarySnapshot, refreshLibrarySnapshots } from "./snapshots.js";
 export { findLibrary, listLibraries, removeLibrary, unlinkLibrary, type LibraryInfo, type UnlinkResult, type UnlinkedSkill } from "./libraries.js";
 export { isInGit } from "./library.js";
 export { addSkill, listSkills, isValidSkillName, expandSkillNames, type SkillInfo, type AddSkillOptions } from "./skills.js";
 export {
+  agentDelivery,
   builtinAgents,
   resolveAgents,
   isAgentInstalled,
   groupBySkillsDir,
   planLinkGroups,
   type AgentProfile,
+  type DeliveryMode,
   type LinkGroup,
 } from "./agents.js";
+export {
+  generatedManifestPath,
+  computeSkillsJsonEntries,
+  applySkillsJsonDelivery,
+  readTargetSkillsJson,
+  readGeneratedFile,
+  hasInheritsRef,
+  upsertInheritsRef,
+  removeInheritsRef,
+  findStateManifest,
+  type SkillsJsonEntry,
+  type DesiredSkillsJson,
+} from "./skills-json.js";
 export { addConfigAgent, removeConfigAgent, ensureConfig, loadProfiles, readConfig, CONFIG_VERSION, type Config, type AgentConfig } from "./config.js";
 export { hashSkillDir, hasUtf8Bom } from "./hash.js";
 export {
@@ -88,6 +103,13 @@ export {
   type LibraryAddResult,
 } from "./library.js";
 export { cloudSyncProvider, hubLocationWarnings } from "./safety.js";
+export {
+  planAntigravityMigration,
+  applyAntigravityMigration,
+  type MigrationPlan,
+  type MigrationResult,
+  type MigrationOptions,
+} from "./migrate.js";
 export { eject, type EjectOptions, type EjectReport, type EjectResult, type EjectOutcome } from "./eject.js";
 export {
   removeSkills,
@@ -100,6 +122,7 @@ export {
 export {
   resolveConflicts,
   choicesFor,
+  choicesForConflict,
   defaultForkName,
   type ConflictChoice,
   type ConflictDecision,

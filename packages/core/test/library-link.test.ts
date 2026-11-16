@@ -8,16 +8,20 @@ import {
   builtinAgents,
   continueImport,
   eject,
+  findLibrary,
+  generatedManifestPath,
   hashSkillDir,
   openHub,
   planLibraryAdd,
   readLinkTarget,
   readManifest,
+  removeLibrary,
   removeSkills,
   resolveConflicts,
   resolveImportConflicts,
   scanStatus,
   sync,
+  unlinkLibrary,
   type AgentProfile,
   type Hub,
 } from "../src/index.js";
@@ -340,3 +344,38 @@ describe("taking linked skills out of the hub", () => {
 async function pathIsDir(p: string): Promise<boolean> {
   return (await fs.stat(p)).isDirectory();
 }
+
+describe("skills-json with --link libraries", () => {
+  it("refreshes antigravity-skills.json on lib repoint, lib unlink, and lib rm", async () => {
+    await addLibrary(hub, lib, { link: true, profiles });
+    await assignSkills(hub, { skills: ["coding", "blog-post"], agents: ["antigravity"], profiles });
+    const genPath = generatedManifestPath(hub, "antigravity");
+
+    // Repoint moved library
+    const moved = path.join(root, "moved-lib");
+    await fs.rename(lib, moved);
+    await addLibrary(hub, moved, { link: true, profiles });
+    let gen = JSON.parse(await fs.readFile(genPath, "utf8"));
+    expect(gen.entries.map((e: { path: string }) => e.path)).toEqual([
+      moved.replace(/\\/g, "/"),
+      path.join(moved, "writing").replace(/\\/g, "/"),
+    ]);
+
+    // Unlink library -> moves entries to hub.skillsDir
+    const info = await findLibrary(hub, "moved-lib");
+    await unlinkLibrary(hub, info, { profiles });
+    gen = JSON.parse(await fs.readFile(genPath, "utf8"));
+    expect(gen.entries).toEqual([
+      { path: hub.skillsDir.replace(/\\/g, "/"), include_only: ["blog-post", "coding"] },
+    ]);
+
+    // Re-link from moved and removeLibrary -> cleans up generated file and keeps library files
+    await removeSkills(hub, { skills: ["blog-post", "coding"], profiles });
+    await addLibrary(hub, moved, { link: true, profiles });
+    await assignSkills(hub, { skills: ["coding"], agents: ["antigravity"], profiles });
+    const info2 = await findLibrary(hub, "moved-lib");
+    await removeLibrary(hub, info2, { profiles });
+    await expect(fs.access(genPath)).rejects.toThrow();
+    expect(await pathIsDir(path.join(moved, "coding"))).toBe(true);
+  });
+});

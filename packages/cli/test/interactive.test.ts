@@ -239,4 +239,24 @@ describe("sync asks about conflicts in a terminal", () => {
     expect(asked).toBe(false);
     expect((await fs.lstat(link())).isSymbolicLink()).toBe(false);
   });
+
+  it("sync offers migration once when legacy gemini config is present and respects skip vs 1", async () => {
+    const hubHome = path.join(root, "hub");
+    await fs.mkdir(hubHome, { recursive: true });
+    await fs.writeFile(
+      path.join(hubHome, "config.json"),
+      JSON.stringify({ version: 1, agents: [{ id: "gemini", skillsDir: "~/.gemini/config/skills" }] }),
+    );
+    await fs.mkdir(path.join(userHome, ".gemini", "config"), { recursive: true });
+    await main(["add", await makeSkill(path.join(root, "src"), "coding"), "-a", "gemini"], io([], false));
+
+    // Skip on Enter -> keeps legacy gemini config
+    expect(await main(["sync"], io([""]))).toBe(0);
+    expect(JSON.parse(await fs.readFile(path.join(hubHome, "config.json"), "utf8")).agents).toHaveLength(1);
+
+    // Confirm with 1 -> migrates to antigravity
+    expect(await main(["sync"], io(["1"]))).toBe(0);
+    expect(JSON.parse(await fs.readFile(path.join(hubHome, "config.json"), "utf8")).agents).toEqual([]);
+    expect(JSON.parse(await fs.readFile(path.join(userHome, ".gemini", "config", "skills.json"), "utf8")).inherits).toHaveLength(1);
+  });
 });

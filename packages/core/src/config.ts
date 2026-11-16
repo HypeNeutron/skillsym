@@ -1,7 +1,7 @@
 import { promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { builtinAgents, type AgentProfile } from "./agents.js";
+import { builtinAgents, type AgentProfile, type DeliveryMode } from "./agents.js";
 import { SkillsymError } from "./errors.js";
 import { writeFileAtomic, writeFileIfAbsent } from "./fsutil.js";
 import type { Hub } from "./hub.js";
@@ -14,9 +14,12 @@ export const CONFIG_VERSION = 1;
 export interface AgentConfig {
   id: string;
   displayName?: string;
+  delivery?: DeliveryMode;
   skillsDir: string;
+  skillsJsonPath?: string;
   alsoReads?: string[];
   detectDir?: string;
+  detectDirs?: string[];
   reload?: AgentProfile["reload"];
   reserved?: string[];
 }
@@ -29,6 +32,7 @@ export interface Config {
 
 const ID_PATTERN = /^[a-z0-9][a-z0-9_-]{0,31}$/i;
 const RELOADS = ["live", "restart", "unknown"];
+const DELIVERIES: DeliveryMode[] = ["link", "skills-json"];
 
 /**
  * Create a starter config only if none exists; never touch an existing one. It lists no agents:
@@ -68,12 +72,18 @@ export async function readConfig(file: string): Promise<Config> {
     if (seen.has(agent.id)) throw invalid(file, `agent id "${agent.id}" appears twice`);
     seen.add(agent.id);
     if (typeof agent.skillsDir !== "string" || !agent.skillsDir.trim()) throw invalid(file, `${where}.skillsDir is required`);
-    for (const key of ["alsoReads", "reserved"] as const) {
+    for (const key of ["alsoReads", "detectDirs", "reserved"] as const) {
       const v = agent[key];
       if (v !== undefined && (!Array.isArray(v) || v.some((x) => typeof x !== "string"))) throw invalid(file, `${where}.${key} must be a list of strings`);
     }
-    for (const key of ["displayName", "detectDir"] as const) {
+    for (const key of ["displayName", "detectDir", "skillsJsonPath"] as const) {
       if (agent[key] !== undefined && typeof agent[key] !== "string") throw invalid(file, `${where}.${key} must be a string`);
+    }
+    if (agent.delivery !== undefined && !DELIVERIES.includes(agent.delivery as DeliveryMode)) {
+      throw invalid(file, `${where}.delivery must be one of ${DELIVERIES.join(", ")}`);
+    }
+    if (agent.delivery === "skills-json" && (typeof agent.skillsJsonPath !== "string" || !agent.skillsJsonPath.trim())) {
+      throw invalid(file, `${where}.skillsJsonPath is required when delivery is "skills-json"`);
     }
     if (agent.reload !== undefined && !RELOADS.includes(agent.reload as string)) throw invalid(file, `${where}.reload must be one of ${RELOADS.join(", ")}`);
     return agent as unknown as AgentConfig;
@@ -157,10 +167,13 @@ export async function loadProfiles(hub: Hub, homedir: string = os.homedir()): Pr
     const profile: AgentProfile = {
       id: a.id,
       displayName: a.displayName ?? a.id,
+      delivery: a.delivery ?? "link",
       skillsDir: expand(a.skillsDir, homedir),
       alsoReads: (a.alsoReads ?? []).map((p) => expand(p, homedir)),
       reload: a.reload ?? "unknown",
+      ...(a.skillsJsonPath !== undefined ? { skillsJsonPath: expand(a.skillsJsonPath, homedir) } : {}),
       ...(a.detectDir !== undefined ? { detectDir: expand(a.detectDir, homedir) } : {}),
+      ...(a.detectDirs !== undefined ? { detectDirs: a.detectDirs.map((p) => expand(p, homedir)) } : {}),
       ...(a.reserved !== undefined ? { reserved: a.reserved } : {}),
     };
     const i = profiles.findIndex((p) => p.id === a.id);

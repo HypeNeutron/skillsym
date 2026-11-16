@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+### Added
+- **`skills-json` delivery & built-in `antigravity` agent**: `antigravity` delivers skills via `<hub>/antigravity-skills.json` (grouped by source folder with `include_only`, including real library parent paths for `--link` skills) and a single `inherits` reference in `~/.gemini/config/skills.json`, preserving user entries and supporting `assign`, `status`, `check`, `sync`, `remove`, `import`, `lib`, and `eject`.
+- **Built-in `gemini` agent**: Gemini CLI (`~/.gemini/skills`, `alsoReads: ["~/.agents/skills"]`), detected when `~/.gemini/skills` exists.
+- **Configurable `delivery` and `skillsJsonPath`**: custom agents in `config.json` can set `"delivery": "skills-json"` and `"skillsJsonPath"`.
+- **`skillsym migrate`**: guided migration (with backups) from legacy `config.json` `gemini` overrides, owned junctions in `~/.gemini/config/skills`, and broad `skills.json` entries to built-in `antigravity`.
+
 ## 0.1.0 — 2026-11-02
 
 First release: the command line tool.

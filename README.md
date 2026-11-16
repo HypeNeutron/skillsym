@@ -23,22 +23,22 @@ other agents, notices when something drifts, and helps you fix it, without copyi
 
 Node.js 20 or later. Works on Windows, macOS and Linux.
 
-**Tested with:** Claude Code, Codex and Cursor on Windows 11. On macOS and Linux, all of skillsym's link handling
+**Tested with:** Claude Code, Codex, Cursor, Gemini CLI and Antigravity (`agy` 1.5.9) on Windows 11. On macOS and Linux, all of skillsym's link handling
 is tested in CI, but it has not yet been tried with the agents themselves. If you use it there, please
 [open an issue](https://github.com/HypeNeutron/skillsym/issues) and say whether your agents picked up the skills.
 
-**Agents that do not read links:** skillsym needs an agent to follow links, and not all do. Antigravity CLI 1.4.12 on
-Windows does not load skills through a junction: `skillsym status` says `synced`, because the link is in place, but
-the agent does not list the skill. The Antigravity IDE has been reported to ignore symlinks on macOS as well.
-
-Until skillsym can install real copies for such an agent, give it copies yourself:
+**Agents that do not read links:** skillsym needs an agent to follow links unless the agent supports a `skills.json`
+manifest. Antigravity ignores Windows junctions (and has been reported to ignore symlinks on macOS), so the built-in
+`antigravity` agent uses **`skills-json` delivery** instead: skillsym writes `<hub>/antigravity-skills.json` grouped by
+source folder (`include_only`) and references it via `inherits` in `~/.gemini/config/skills.json`, keeping your own
+entries untouched. For other agents that neither follow links nor read `skills.json`, give them real copies with:
 
 ```bash
 npx skillsym eject -a <agent>
 ```
 
-The agent then loads the skills, but skillsym no longer manages them: edits in the hub do not reach those copies, and
-`import` would turn them back into links the agent cannot read.
+Previously configured `gemini` at `~/.gemini/config/skills`? Run `npx skillsym migrate` (or `skillsym sync` in a
+terminal) to switch safely to `antigravity` with backups.
 
 ## Quickstart
 
@@ -150,6 +150,8 @@ Tested in Windows PowerShell 5.1 and in bash. The zsh script has not been tried 
 | `claude` | `~/.claude/skills` | Picks up edits immediately. |
 | `codex` | `~/.agents/skills` | Also reads `~/.codex/skills`; `import` moves skills found there into the hub and links them from `~/.agents/skills`. Rejects a `SKILL.md` that starts with a UTF-8 BOM; skillsym warns about those. |
 | `cursor` | `~/.cursor/skills` | Also reads `~/.claude/skills`, `~/.codex/skills` and `~/.agents/skills`, so it is usually *covered* by another agent's link. Reloads skills only when restarted. |
+| `gemini` | `~/.gemini/skills` | Gemini CLI (`@google/gemini-cli`). Also reads `~/.agents/skills`; detected when `~/.gemini/skills` exists. |
+| `antigravity` | `~/.gemini/config/skills.json` | Uses `skills-json` delivery (`inherits` → `<hub>/antigravity-skills.json`) so hub and `--link` skills load without junctions; `eject` copies real folders to `~/.gemini/config/skills`. |
 | `universal` | `~/.agents/skills` | The shared folder several agents read. |
 
 Use `-a '*'` for every agent installed on this machine. `skillsym config` shows every agent and its folder.
@@ -170,13 +172,15 @@ the hub folder. skillsym creates it with an empty `agents` list, because built-i
   "version": 1,
   "agents": [
     { "id": "windsurf", "skillsDir": "~/.windsurf/skills" },
-    { "id": "reader", "skillsDir": "~/.reader/skills", "alsoReads": ["~/.claude/skills"], "reload": "restart" }
+    { "id": "reader", "skillsDir": "~/.reader/skills", "alsoReads": ["~/.claude/skills"], "reload": "restart" },
+    { "id": "my-ide", "delivery": "skills-json", "skillsDir": "~/.my-ide/skills", "skillsJsonPath": "~/.my-ide/skills.json" }
   ]
 }
 ```
 
 An agent with the same id as a built-in one replaces it. `alsoReads` lists other folders the agent loads skills
-from, so skillsym does not give it a second copy of a skill it already sees.
+from, so skillsym does not give it a second copy of a skill it already sees. Set `"delivery": "skills-json"` and
+`"skillsJsonPath"` for any custom agent that uses an Antigravity-style `skills.json` manifest instead of folder links.
 
 ## Commands
 
@@ -203,6 +207,7 @@ from, so skillsym does not give it a second copy of a skill it already sees.
 | `skillsym config add <id> <folder>` / `config remove <id>` | Add an agent, or take one out (not while skills are assigned to it). |
 | `skillsym eject [--dry-run]` | Stop using skillsym: replace every link with a real copy. |
 | `skillsym eject <skill...> [-a agents]` / `eject -a <agents>` | Give back only these: their links become real copies of the latest hub version, and everything else stays managed. |
+| `skillsym migrate [--dry-run]` | Migrate legacy Antigravity setups (`gemini` config/links and broad `skills.json` entries) to built-in `antigravity` `skills-json` delivery. |
 
 Options:
 
@@ -368,9 +373,10 @@ skillsym makes no network calls and collects no telemetry. Everything stays on y
 What comes next depends on what people run into, so please [open an issue](https://github.com/HypeNeutron/skillsym/issues).
 The ideas so far:
 
-- Real copies for agents that do not read links, kept up to date by `sync`.
+- Real copies for agents that neither read links nor support `skills.json`, kept up to date by `sync` (`antigravity` already uses `skills-json` delivery).
 - Project-level skills (`-p`).
 - Groups of skills, and choosing skills with the arrow keys.
+- Opt-in updates for skills and `--link` libraries backed by GitHub repositories.
 - A background watcher that notices drift as it happens.
 
 Teams: if you want to share a skill library across a team, see drift across everyone's machines, or roll out a new

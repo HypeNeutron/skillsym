@@ -4,6 +4,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
   addSkill,
   builtinAgents,
+  generatedManifestPath,
   hashSkillDir,
   importSkills,
   openHub,
@@ -168,5 +169,21 @@ describe("import leaves what it cannot decide untouched", () => {
     expect({ claude: await listDir(claude()), hub: await listDir(hub.skillsDir), manifest: await fs.readFile(hub.manifestPath, "utf8") }).toEqual(before);
     const { items } = await runImport();
     expect(items.map((i) => `${i.name}:${i.type}`)).toEqual(["coding:conflict", "research:import"]);
+  });
+
+  it("imports real folders from antigravity skillsDir into the hub and registers via skills-json (no junctions)", async () => {
+    const agySkillsDir = path.join(userHome, ".gemini", "config", "skills");
+    await makeSkill(agySkillsDir, "from-agy", { "extra.md": "hello" });
+
+    const { items } = await importSkills(hub, { agents: ["antigravity"], profiles });
+    expect(items).toHaveLength(1);
+    expect(items[0]).toMatchObject({ name: "from-agy", type: "import", ok: true });
+    expect(items[0]!.backups).toHaveLength(1);
+    await expect(fs.access(path.join(agySkillsDir, "from-agy"))).rejects.toThrow();
+    expect(await fs.readFile(path.join(hub.skillsDir, "from-agy", "extra.md"), "utf8")).toBe("hello");
+    expect(JSON.parse(await fs.readFile(generatedManifestPath(hub, "antigravity"), "utf8"))).toEqual({
+      entries: [{ path: hub.skillsDir.replace(/\\/g, "/"), include_only: ["from-agy"] }],
+    });
+    expect((await scanStatus(hub, { profiles })).clean).toBe(true);
   });
 });

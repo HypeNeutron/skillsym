@@ -10,6 +10,7 @@ import { createDirLink, readLinkTarget, removeDirLink } from "./links.js";
 import { withLock, type LockOptions } from "./lock.js";
 import { readManifest, writeManifest, type Manifest } from "./manifest.js";
 import { removeSkills, type RemoveResult } from "./remove.js";
+import { refreshSkillsJsonManifests } from "./skills-json.js";
 import { hasLibrarySnapshot, librarySnapshotDir, removeLibrarySnapshot } from "./snapshots.js";
 import { samePath } from "./state.js";
 
@@ -73,7 +74,12 @@ export interface UnlinkResult {
  * Stop using a library but keep its skills: each hub link becomes a real copy, so agents, whose links
  * point at the hub, carry on. This is `add --link` in reverse. The library itself is never touched.
  */
-export async function unlinkLibrary(hub: Hub, library: LibraryInfo, options: { dryRun?: boolean; lock?: LockOptions } = {}): Promise<UnlinkResult> {
+export async function unlinkLibrary(
+  hub: Hub,
+  library: LibraryInfo,
+  options: { dryRun?: boolean; lock?: LockOptions; profiles?: AgentProfile[] } = {},
+): Promise<UnlinkResult> {
+  const profiles = options.profiles ?? builtinAgents();
   const run = async (): Promise<UnlinkResult> => {
     const manifest = await readManifest(hub.manifestPath);
     const skills: UnlinkedSkill[] = [];
@@ -103,6 +109,7 @@ export async function unlinkLibrary(hub: Hub, library: LibraryInfo, options: { d
     }
     const forgotten = skills.every((s) => s.outcome !== "lost");
     if (forgotten && !options.dryRun) await forget(hub, manifest, library.path);
+    if (!options.dryRun) await refreshSkillsJsonManifests(hub, profiles, manifest);
     return { library: library.path, skills, forgotten };
   };
   return options.dryRun ? run() : withLock(hub.lockPath, run, options.lock);

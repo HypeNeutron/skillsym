@@ -5,6 +5,8 @@ import {
   addSkill,
   assignSkills,
   builtinAgents,
+  choicesForConflict,
+  generatedManifestPath,
   hashSkillDir,
   openHub,
   readLinkTarget,
@@ -174,5 +176,39 @@ describe("other cases", () => {
   it("reports a decision for a path that has no conflict", async () => {
     const [r] = await resolve([{ path: claudeLink(), choice: "restore" }]);
     expect(r).toMatchObject({ ok: false, error: "no conflict at this path any more" });
+  });
+});
+
+describe("skills-json conflicts", () => {
+  const skillsJsonPath = () => path.join(userHome, ".gemini", "config", "skills.json");
+  const genPath = () => generatedManifestPath(hub, "antigravity");
+
+  it("restore backs up an externally modified generated file and restores it", async () => {
+    await assignSkills(hub, { skills: ["coding"], agents: ["antigravity"], profiles });
+    await fs.writeFile(genPath(), '{"entries": [], "handEdit": true}\n');
+
+    const { conflicts } = await sync(hub, { profiles });
+    const agyConflict = conflicts.find((c) => c.agents.includes("antigravity"))!;
+    expect(choicesForConflict(agyConflict)).toEqual(["restore", "skip"]);
+
+    const [r] = await resolve([{ path: agyConflict.path, choice: "restore" }]);
+    expect(r).toMatchObject({ ok: true, choice: "restore" });
+    expect(r!.backups).toHaveLength(1);
+    expect(await fs.readFile(r!.backups[0]!, "utf8")).toContain("handEdit");
+    expect(JSON.parse(await fs.readFile(genPath(), "utf8")).entries[0].include_only).toEqual(["coding"]);
+    expect((await scanStatus(hub, { profiles })).clean).toBe(true);
+  });
+
+  it("drop on missing-owned unassigns antigravity and cleans up generated file", async () => {
+    await assignSkills(hub, { skills: ["coding"], agents: ["antigravity"], profiles });
+    await fs.writeFile(skillsJsonPath(), '{"entries": []}\n');
+
+    const { conflicts } = await sync(hub, { profiles });
+    const agyConflict = conflicts.find((c) => c.agents.includes("antigravity"))!;
+    const [r] = await resolve([{ path: agyConflict.path, choice: "drop" }]);
+    expect(r).toMatchObject({ ok: true, choice: "drop" });
+    expect((await readManifest(hub.manifestPath)).skills.coding!.agents).not.toContain("antigravity");
+    await expect(fs.access(genPath())).rejects.toThrow();
+    expect((await scanStatus(hub, { profiles })).clean).toBe(true);
   });
 });

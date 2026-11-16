@@ -53,6 +53,11 @@ import {
   filterStatus,
   SkillsymError,
   sync,
+  choicesForConflict,
+  planAntigravityMigration,
+  applyAntigravityMigration,
+  type MigrationPlan,
+  type MigrationResult,
   type AgentLinkResult,
   type AgentProfile,
   type ConflictChoice,
@@ -141,9 +146,10 @@ Commands:
                                 the hub is kept, delete it yourself when you are sure)
   eject <skill...> [-a <agents>] Give back only these skills or agents: their links become real copies of the
   eject -a <agents>             latest hub version. A skill no agent uses afterwards leaves the hub (copy in backups)
+  migrate [--dry-run]           Migrate legacy Antigravity config/links to built-in antigravity skills-json delivery
 
 Options:
-  -a, --agent <ids>  Agents: claude, codex, cursor, universal; comma-separated or repeated; '*' = all installed
+  -a, --agent <ids>  Agents: claude, codex, cursor, gemini, antigravity, universal; comma-separated or repeated; '*' = all installed
   -s, --skill <name> Skill names (alternative to positional names); '*' = all skills in the hub
                      Names in assign, remove, eject and import may be patterns: 'gcp-*', 'skill-?'
   --only <states>    status, check: only these statuses, comma-separated (synced, covered, missing, ...)
@@ -186,6 +192,7 @@ export const COMMAND_OPTIONS: Record<string, string[]> = {
   completion: [],
   lib: ["dry-run", "yes"],
   library: ["dry-run", "yes"],
+  migrate: ["dry-run", "yes"],
 };
 const GLOBAL_OPTIONS = ["json", "help", "version", "global", "project"];
 
@@ -381,7 +388,7 @@ async function run(argv: string[], io: Io, json: boolean): Promise<ExitCode> {
     return 0;
   }
 
-  const writes = (["add", "assign", "sync", "remove", "rm", "import", "eject"].includes(command) && !values["dry-run"]) || (command === "config" && rest.length > 0) || ((command === "lib" || command === "library") && ["unlink", "rm", "remove"].includes(rest[0] ?? "") && !values["dry-run"]);
+  const writes = (["add", "assign", "sync", "remove", "rm", "import", "eject", "migrate"].includes(command) && !values["dry-run"]) || (command === "config" && rest.length > 0) || ((command === "lib" || command === "library") && ["unlink", "rm", "remove"].includes(rest[0] ?? "") && !values["dry-run"]);
   // Only commands that change something create the hub; status, list and --dry-run leave the disk alone.
   const home = resolveHubHome({ env: io.env });
   const hub = writes ? await openHub(home) : hubPaths(home);
@@ -467,7 +474,16 @@ async function run(argv: string[], io: Io, json: boolean): Promise<ExitCode> {
     }
     case "sync": {
       const skills = [...rest, ...(values.skill ?? [])];
-      const choice = { profiles, ...(skills.length ? { skills } : {}), ...(agents.length ? { agents } : {}) };
+      const canAsk = Boolean(io.interactive && io.ask && !json && !values.yes);
+      let activeProfiles = profiles;
+      if (canAsk && !values["dry-run"] && !skills.length && !agents.length) {
+        const migPlan = await planAntigravityMigration(hub, { profiles: activeProfiles, homedir: userHome(io.env) });
+        if (migPlan.needed) {
+          const migrated = await promptAntigravityMigration(hub, migPlan, io, activeProfiles);
+          if (migrated) activeProfiles = await loadProfiles(hub, userHome(io.env));
+        }
+      }
+      const choice = { profiles: activeProfiles, ...(skills.length ? { skills } : {}), ...(agents.length ? { agents } : {}) };
       if (values["dry-run"]) {
         const plan = await planSync(hub, choice);
         if (json) io.stdout(JSON.stringify({ dryRun: true, ...plan }));
@@ -475,7 +491,6 @@ async function run(argv: string[], io: Io, json: boolean): Promise<ExitCode> {
         return plan.conflicts.length ? 1 : 0;
       }
       const result = await sync(hub, choice);
-      const canAsk = Boolean(io.interactive && io.ask && !json && !values.yes);
       if (!json && result.snapshotFailed.length) io.stderr(`warning: could not update the library snapshot of ${result.snapshotFailed.join(", ")}.`);
       if (json) io.stdout(JSON.stringify({ dryRun: false, ...result }));
       // About to ask about conflicts with nothing else to report: "Already in sync" would be untrue.
@@ -483,7 +498,7 @@ async function run(argv: string[], io: Io, json: boolean): Promise<ExitCode> {
       const failed = result.results.some((r) => !r.ok);
       if (!result.conflicts.length || !canAsk) return failed ? 2 : result.conflicts.length ? 1 : 0;
 
-      const resolutions = await askAndResolve(hub, result.conflicts, io, profiles);
+      const resolutions = await askAndResolve(hub, result.conflicts, io, activeProfiles);
       io.stdout(formatResolutions(resolutions));
       if (resolutions.some((r) => r.choice === "skip")) io.stdout("\nSkipped conflicts are unchanged. Run `skillsym sync` again whenever you want to decide them.");
       if (failed || resolutions.some((r) => !r.ok)) return 2;
@@ -626,7 +641,7 @@ async function run(argv: string[], io: Io, json: boolean): Promise<ExitCode> {
         return 0;
       }
       if (action === "unlink") {
-        const result = await unlinkLibrary(hub, library, { dryRun });
+        const result = await unlinkLibrary(hub, library, { dryRun, profiles });
         if (json) io.stdout(JSON.stringify({ dryRun, ...result }));
         else io.stdout(formatUnlink(library, result, dryRun));
         return result.forgotten ? 0 : 1;
@@ -691,7 +706,9 @@ async function run(argv: string[], io: Io, json: boolean): Promise<ExitCode> {
       const rows = await Promise.all(
         profiles.map(async (p) => ({
           id: p.id,
+          delivery: p.delivery ?? "link",
           skillsDir: p.skillsDir,
+          ...(p.skillsJsonPath ? { skillsJsonPath: p.skillsJsonPath } : {}),
           source: customIds.has(p.id) ? ("config" as const) : ("built-in" as const),
           installed: await isAgentInstalled(p),
         })),
@@ -699,6 +716,36 @@ async function run(argv: string[], io: Io, json: boolean): Promise<ExitCode> {
       const exists = await isFile(hub.configPath);
       if (json) io.stdout(JSON.stringify({ configPath: hub.configPath, exists, agents: rows }));
       else io.stdout(formatConfig(hub.configPath, exists, rows));
+      return 0;
+    }
+    case "migrate": {
+      if (rest.length) throw new UsageError("migrate takes no positional arguments: skillsym migrate [--dry-run] [-y]");
+      const dryRun = Boolean(values["dry-run"]);
+      const homedir = userHome(io.env);
+      const plan = await planAntigravityMigration(hub, { profiles, homedir });
+      if (dryRun) {
+        if (json) io.stdout(JSON.stringify({ dryRun: true, ...plan }));
+        else io.stdout(formatMigrationPlan(plan));
+        return 0;
+      }
+      if (!plan.needed) {
+        if (json) io.stdout(JSON.stringify({ dryRun: false, ...plan, applied: false, backups: [], unlinkedCount: 0, removedBroadEntries: 0 }));
+        else io.stdout("Nothing to migrate.");
+        return 0;
+      }
+      if (!values.yes) {
+        if (!(io.interactive && io.ask && !json)) {
+          throw new UsageError("Migration edits config.json, skills.json, and removes old junctions (with backups). Confirm with -y, or preview with `skillsym migrate --dry-run`.");
+        }
+        const ok = await askMigrationConfirm(plan, io);
+        if (!ok) {
+          io.stdout("Skipped migration; nothing changed.");
+          return 1;
+        }
+      }
+      const migrated = await applyAntigravityMigration(hub, { profiles, homedir });
+      if (json) io.stdout(JSON.stringify({ dryRun: false, ...migrated }));
+      else io.stdout(formatMigrationResult(migrated));
       return 0;
     }
     default:
@@ -736,7 +783,7 @@ async function addFromLibrary(
     else io.stdout(formatLibrary(plan.items, library, true, link));
     return plan.items.some((i) => i.type === "skip") ? 1 : 0;
   }
-  const result = await addLibrary(hub, library, { link });
+  const result = await addLibrary(hub, library, { link, profiles });
   // -a applies to every skill now linked from the library, including ones already linked earlier.
   const names = result.items.filter((i) => i.type !== "skip").map((i) => i.name);
   const assigned = agents.length && names.length ? (await assignSkills(hub, { skills: names, agents, profiles })).results : [];
@@ -1116,13 +1163,20 @@ function formatUnlink(library: LibraryInfo, result: UnlinkResult, dryRun: boolea
   return lines.join("\n");
 }
 
-function formatConfig(file: string, exists: boolean, rows: { id: string; skillsDir: string; source: string; installed: boolean }[]): string {
+function formatConfig(
+  file: string,
+  exists: boolean,
+  rows: { id: string; delivery: string; skillsDir: string; skillsJsonPath?: string; source: string; installed: boolean }[],
+): string {
   const width = Math.max(...rows.map((r) => r.id.length));
   return [
     `Config file: ${file}${exists ? "" : "  (not created yet; it appears the first time a command changes something)"}`,
     "",
     "Agents:",
-    ...rows.map((r) => `  ${r.id.padEnd(width)}  ${r.skillsDir}  (${r.source}${r.installed ? "" : ", not installed"})`),
+    ...rows.map((r) => {
+      const target = r.skillsJsonPath ? `${r.skillsJsonPath}  [skills-json]` : r.skillsDir;
+      return `  ${r.id.padEnd(width)}  ${target}  (${r.source}${r.installed ? "" : ", not installed"})`;
+    }),
     "",
     "Add an agent with `skillsym config add <id> <folder>`; to change a folder, edit the config file (see the README).",
   ].join("\n");
@@ -1145,6 +1199,22 @@ const STATUS_ORDER = ["synced", "covered", "missing", "dangling", "replaced", "b
 
 function entryHint(e: StatusReport["entries"][number]): string {
   let hint = STATUS_HINT[e.status];
+  if (e.delivery === "skills-json") {
+    if (e.status === "missing") {
+      hint = e.owned
+        ? "skillsym's inherits entry or manifest was removed; `skillsym sync` will ask whether to restore it or drop the assignment"
+        : "not yet in the agent's skills-json manifest; `skillsym sync` will update it";
+    } else if (e.status === "replaced") {
+      hint = e.sameContent
+        ? "generated skills-json file matches the hub but is not tracked; `skillsym sync` will record it"
+        : "generated skills-json file was modified outside skillsym; `skillsym sync` will ask";
+    } else if (e.status === "orphaned") {
+      hint = "no longer assigned in the manifest; `skillsym sync` will update the skills-json manifest";
+    } else if (e.status === "blocked") {
+      hint = "skills.json is not valid JSON; fix it before syncing";
+    }
+    return hint;
+  }
   if (e.status === "covered" && e.coveredBy) hint = `loads it from ${e.coveredBy.dir} (${e.coveredBy.agents.join(", ")}); no second link needed`;
   if (e.status === "missing" && e.owned) hint = "skillsym's link was removed; `skillsym sync` will ask whether to restore it or drop the assignment";
   if (e.status === "replaced") hint += e.sameContent ? " by an identical copy; `skillsym sync` will re-link it" : " by different content; `skillsym sync` will ask";
@@ -1222,6 +1292,8 @@ const ACTION_TEXT: Record<SyncAction["type"], [string, string]> = {
   "unlink-duplicate": ["would remove duplicate link", "removed duplicate link"],
   forget: ["would stop tracking", "stopped tracking"],
   record: ["would record existing link", "recorded existing link"],
+  "update-manifest": ["would update skills-json manifest", "updated skills-json manifest"],
+  "unlink-manifest": ["would remove skills-json manifest", "removed skills-json manifest"],
 };
 
 function formatSync(actions: (SyncAction | SyncActionResult)[], conflicts: SyncConflict[], dryRun: boolean): string {
@@ -1278,8 +1350,14 @@ async function askAndResolve(hub: Hub, conflicts: SyncConflict[], io: Io, profil
     // A missing library skill can only come back from a snapshot, if there is one.
     const fromSnapshot = c.type === "source-missing";
     const canRestore = !fromSnapshot || (await hasLibrarySnapshot(hub, c.skill));
-    const choices = choicesFor(c.type).filter((choice) => choice !== "restore" || canRestore);
-    io.stdout(`\n${c.skill} -> ${c.agents.join(", ")} ${CONFLICT_TITLE[c.type]}\n  ${c.path}`);
+    const choices = choicesForConflict(c).filter((choice) => choice !== "restore" || canRestore);
+    const title =
+      c.delivery === "skills-json" && c.type === "missing-owned"
+        ? "skills-json inherits or generated file was removed"
+        : c.delivery === "skills-json" && c.type === "replaced-different"
+          ? "generated skills-json file was modified outside skillsym"
+          : CONFLICT_TITLE[c.type];
+    io.stdout(`\n${c.skill} -> ${c.agents.join(", ")} ${title}\n  ${c.path}`);
     for (const choice of choices) {
       const help = fromSnapshot && choice === "restore" ? "put the skill back in your library from skillsym's latest snapshot" : CHOICE_HELP[choice];
       io.stdout(`  [${choice[0]}] ${choice.padEnd(7)} ${help}`);
@@ -1358,6 +1436,49 @@ function report(err: unknown, io: Io, json: boolean): ExitCode {
 function userHome(env: NodeJS.ProcessEnv): string {
   const fromEnv = process.platform === "win32" ? env.USERPROFILE : env.HOME;
   return fromEnv?.trim() || os.homedir();
+}
+
+function formatMigrationPlan(plan: MigrationPlan): string {
+  if (!plan.needed) return "Nothing to migrate.";
+  const lines = ["Migration preview (dry run — nothing changed):"];
+  if (plan.legacyConfigAgent) lines.push(`  - remove legacy "gemini" override from ${plan.configPath} (backed up first)`);
+  if (plan.manifestSkillsToMove.length) lines.push(`  - move ${plan.manifestSkillsToMove.length} skill assignment(s) from gemini to antigravity`);
+  if (plan.ownedLinksToRemove.length) lines.push(`  - remove ${plan.ownedLinksToRemove.length} skillsym-owned link(s) in Antigravity's skills folder`);
+  if (plan.broadSkillsJsonEntries.length) lines.push(`  - remove broad entry/entries (${plan.broadSkillsJsonEntries.join(", ")}) from ${plan.skillsJsonPath} (backed up first)`);
+  lines.push("  - write skills-json manifest + inherits for built-in antigravity", "", "Run `skillsym migrate` to apply.");
+  return lines.join("\n");
+}
+
+function formatMigrationResult(res: MigrationResult): string {
+  const lines = [
+    `Migrated to built-in "antigravity" (skills-json delivery):`,
+    `  - moved ${res.manifestSkillsToMove.length} skill assignment(s)`,
+    `  - removed ${res.unlinkedCount} legacy link(s) and ${res.removedBroadEntries} broad skills.json entry/entries`,
+    ...res.backups.map((b) => `  - backup: ${b}`),
+  ];
+  return lines.join("\n");
+}
+
+async function askMigrationConfirm(plan: MigrationPlan, io: Io): Promise<boolean> {
+  const details: string[] = [];
+  if (plan.legacyConfigAgent) details.push(`legacy "gemini" config pointing at Antigravity's folder`);
+  if (plan.ownedLinksToRemove.length) details.push(`${plan.ownedLinksToRemove.length} legacy link(s)`);
+  if (plan.broadSkillsJsonEntries.length) details.push(`whole-folder entries (${plan.broadSkillsJsonEntries.join(", ")}) in ${plan.skillsJsonPath}`);
+  io.stdout(
+    `\nskillsym now supports Antigravity directly via skills.json.\nFound: ${details.join("; ")}.\n  [1] Migrate to built-in antigravity (backs up files, keeps custom entries and real folders)\n  [2] Skip for now (Enter = skip)`,
+  );
+  const answer = (await io.ask!("Choose [1/2] (Enter = skip): ")).trim().toLowerCase();
+  return answer === "1" || answer === "y" || answer === "yes";
+}
+
+async function promptAntigravityMigration(hub: Hub, plan: MigrationPlan, io: Io, profiles: AgentProfile[]): Promise<boolean> {
+  if (!(await askMigrationConfirm(plan, io))) {
+    io.stdout("Skipped migration; continuing with sync.\n");
+    return false;
+  }
+  const migrated = await applyAntigravityMigration(hub, { profiles, homedir: path.dirname(path.dirname(path.dirname(plan.skillsJsonPath))) });
+  io.stdout(formatMigrationResult(migrated) + "\n");
+  return migrated.applied;
 }
 
 function version(): string {

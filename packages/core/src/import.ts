@@ -1,7 +1,7 @@
 import { randomBytes } from "node:crypto";
 import { promises as fs } from "node:fs";
 import path from "node:path";
-import { builtinAgents, planLinkGroups, resolveAgents, type AgentProfile } from "./agents.js";
+import { agentDelivery, builtinAgents, planLinkGroups, resolveAgents, type AgentProfile } from "./agents.js";
 import { backupStamp, moveToBackup } from "./backup.js";
 import { SkillsymError } from "./errors.js";
 import { isDirectory, isFile } from "./fsutil.js";
@@ -11,6 +11,7 @@ import { createDirLink, readLinkTarget } from "./links.js";
 import { withLock, type LockOptions } from "./lock.js";
 import { readManifest, writeManifest } from "./manifest.js";
 import { expandSkillNames, isValidSkillName } from "./skills.js";
+import { applySkillsJsonDelivery } from "./skills-json.js";
 import { readState, samePath, writeState } from "./state.js";
 import { scanStatus } from "./status.js";
 import { recordStateLink } from "./sync.js";
@@ -265,5 +266,18 @@ export async function replaceWithLinks(
     await writeState(hub.statePath, state);
     result.linked.push(linkPath);
     healthy.push(group.dir);
+  }
+
+  for (const agent of assigned.filter((p) => agentDelivery(p) === "skills-json")) {
+    for (const source of sources) {
+      if (moved.has(source.path)) continue;
+      if (!samePath(path.dirname(source.path), agent.skillsDir)) continue;
+      moved.add(source.path);
+      result.backups.push(await moveToBackup(hub, source.path, `import-${source.agents.join("+")}`, path.basename(source.path), stamp));
+    }
+    const applied = await applySkillsJsonDelivery(hub, agent, manifest, state);
+    if (!applied.ok) throw new Error(applied.reason);
+    await writeState(hub.statePath, state);
+    if (agent.skillsJsonPath) result.linked.push(agent.skillsJsonPath);
   }
 }

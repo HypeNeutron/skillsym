@@ -28,6 +28,14 @@ export async function moveToBackup(hub: Hub, from: string, label: string, name: 
   return dest;
 }
 
+/** Copy a file or folder into backups without removing the original. Returns where it went. */
+export async function copyToBackup(hub: Hub, from: string, label: string, name: string, stamp?: string): Promise<string> {
+  const dest = backupPath(hub, label, name, stamp);
+  await fs.mkdir(path.dirname(dest), { recursive: true });
+  await fs.cp(from, dest, { recursive: true, errorOnExist: true });
+  return dest;
+}
+
 /**
  * Get whatever occupies `p` out of the way without losing it: a link is simply removed (its target
  * is untouched); a real folder or file is moved into the hub's backups. Returns the backup path,

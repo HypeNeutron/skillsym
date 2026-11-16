@@ -5,6 +5,7 @@ import {
   addSkill,
   assignSkills,
   builtinAgents,
+  generatedManifestPath,
   hashSkillDir,
   openHub,
   planSync,
@@ -219,5 +220,56 @@ describe("sync is safe to repeat and to preview", () => {
     const result = await runSync();
     expect(result.actions).toEqual(preview.actions);
     expect(result.conflicts).toEqual(preview.conflicts);
+  });
+});
+
+describe("sync with skills-json delivery", () => {
+  const skillsJsonPath = () => path.join(userHome, ".gemini", "config", "skills.json");
+  const genPath = () => generatedManifestPath(hub, "antigravity");
+
+  it("auto-updates manifest drift, cleans up when zero skills remain, and stays idempotent", async () => {
+    await setAgents("coding", ["claude", "antigravity"]);
+    const first = await runSync();
+    expect(first.results).toEqual([expect.objectContaining({ type: "update-manifest", ok: true })]);
+    expect(JSON.parse(await fs.readFile(genPath(), "utf8")).entries[0].include_only).toEqual(["coding"]);
+    expect((await statuses()).filter(([s]) => s === "coding")).toEqual([
+      ["coding", "synced"],
+      ["coding", "synced"],
+    ]);
+
+    // Adding a second skill in manifest silently updates generated file
+    await setAgents("research", ["antigravity"]);
+    const second = await runSync();
+    expect(second.results).toEqual([expect.objectContaining({ type: "update-manifest", ok: true })]);
+    expect(JSON.parse(await fs.readFile(genPath(), "utf8")).entries[0].include_only).toEqual(["coding", "research"]);
+
+    // Second run is a no-op
+    const stateBefore = await fs.readFile(hub.statePath, "utf8");
+    const noop = await runSync();
+    expect(noop.actions).toEqual([]);
+    expect(await fs.readFile(hub.statePath, "utf8")).toBe(stateBefore);
+
+    // Unassigning all skills from antigravity cleans up generated file and inherits
+    await setAgents("coding", ["claude"]);
+    await setAgents("research", []);
+    const cleanup = await runSync();
+    expect(cleanup.results).toEqual([expect.objectContaining({ type: "unlink-manifest", ok: true })]);
+    await expect(fs.access(genPath())).rejects.toThrow();
+    expect(JSON.parse(await fs.readFile(skillsJsonPath(), "utf8")).inherits).toBeUndefined();
+    expect((await readState(hub.statePath)).manifests).toEqual([]);
+  });
+
+  it("reports conflicts instead of overwriting externally modified generated file or deleted inherits", async () => {
+    await assignSkills(hub, { skills: ["coding"], agents: ["antigravity"], profiles });
+
+    await fs.writeFile(genPath(), '{"entries": [], "custom": 1}\n');
+    const c1 = await runSync();
+    expect(c1.conflicts).toEqual([expect.objectContaining({ type: "replaced-different", agents: ["antigravity"], delivery: "skills-json" })]);
+    expect(await fs.readFile(genPath(), "utf8")).toContain('"custom": 1');
+
+    // Restore hash match, then remove inherits from skills.json -> missing-owned
+    await fs.rm(genPath());
+    const c2 = await runSync();
+    expect(c2.conflicts).toEqual([expect.objectContaining({ type: "missing-owned", agents: ["antigravity"], delivery: "skills-json" })]);
   });
 });

@@ -19,10 +19,24 @@ export interface StateLink {
   createdAt: string;
 }
 
+/** One generated skills-json manifest skillsym manages for an agent. */
+export interface StateManifest {
+  agent: string;
+  skillsJsonPath: string;
+  generatedPath: string;
+  /** SHA-256 of the generated JSON file last written by skillsym. */
+  generatedHash: string;
+  /** Skill names delivered when this record was written. */
+  skills: string[];
+  updatedAt: string;
+}
+
 /** What skillsym has actually created (as opposed to the manifest, which is what the user wants). */
 export interface State {
   version: number;
   links: StateLink[];
+  /** Generated skills-json deliveries owned by skillsym. */
+  manifests?: StateManifest[];
 }
 
 export async function readState(file: string): Promise<State> {
@@ -30,7 +44,7 @@ export async function readState(file: string): Promise<State> {
   try {
     raw = (await fs.readFile(file, "utf8")).replace(/^﻿/, "");
   } catch (err) {
-    if ((err as NodeJS.ErrnoException).code === "ENOENT") return { version: STATE_VERSION, links: [] };
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") return { version: STATE_VERSION, links: [], manifests: [] };
     throw err;
   }
   let parsed: unknown;
@@ -43,6 +57,9 @@ export async function readState(file: string): Promise<State> {
   if (typeof obj?.version !== "number" || !Array.isArray(obj.links)) {
     throw new SkillsymError("STATE_CORRUPT", `State file is malformed: ${file}`, { file });
   }
+  if (obj.manifests !== undefined && !Array.isArray(obj.manifests)) {
+    throw new SkillsymError("STATE_CORRUPT", `State file is malformed (manifests): ${file}`, { file });
+  }
   if (obj.version !== STATE_VERSION) {
     throw new SkillsymError(
       "UNSUPPORTED_STATE_VERSION",
@@ -51,12 +68,18 @@ export async function readState(file: string): Promise<State> {
       { file, version: obj.version, supported: STATE_VERSION },
     );
   }
-  return { version: obj.version, links: obj.links };
+  return { version: obj.version, links: obj.links, manifests: obj.manifests ?? [] };
 }
 
 export async function writeState(file: string, state: State): Promise<void> {
   const links = [...state.links].sort((a, b) => a.path.localeCompare(b.path));
-  await writeFileAtomic(file, JSON.stringify({ version: state.version, links }, null, 2) + "\n");
+  const manifests = [...(state.manifests ?? [])].sort((a, b) => a.agent.localeCompare(b.agent));
+  const payload: State = {
+    version: state.version,
+    links,
+    ...(manifests.length ? { manifests } : {}),
+  };
+  await writeFileAtomic(file, JSON.stringify(payload, null, 2) + "\n");
 }
 
 /** Paths are compared case-insensitively on Windows, where the filesystem is case-insensitive. */

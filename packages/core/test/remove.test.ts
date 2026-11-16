@@ -5,6 +5,7 @@ import {
   addSkill,
   assignSkills,
   builtinAgents,
+  generatedManifestPath,
   hashSkillDir,
   listSkills,
   openHub,
@@ -155,5 +156,37 @@ describe("remove safety", () => {
     const err = await remove({ skills: ["coding", "nope"] }).catch((e: unknown) => e);
     expect((err as SkillsymError).code).toBe("SKILL_NOT_IN_HUB");
     expect(await listDir(hub.skillsDir)).toEqual(["coding", "research"]);
+  });
+});
+
+describe("remove with skills-json delivery", () => {
+  const skillsJsonPath = () => path.join(userHome, ".gemini", "config", "skills.json");
+  const genPath = () => generatedManifestPath(hub, "antigravity");
+
+  it("updates generated manifest on partial unassign, cleans up inherits when empty, and respects --dry-run", async () => {
+    await assignSkills(hub, { skills: ["coding", "research"], agents: ["antigravity"], profiles });
+    await fs.writeFile(
+      skillsJsonPath(),
+      JSON.stringify({
+        inherits: [{ path: genPath().replace(/\\/g, "/") }, { path: "~/keep-me.json" }],
+        entries: [{ path: "~/manual" }],
+      }),
+    );
+
+    const preview = await remove({ skills: ["coding"], agents: ["antigravity"], dryRun: true });
+    expect(preview.links).toEqual([{ skill: "coding", agents: ["antigravity"], path: skillsJsonPath(), outcome: "unlinked" }]);
+    expect(JSON.parse(await fs.readFile(genPath(), "utf8")).entries[0].include_only).toEqual(["coding", "research"]);
+
+    await remove({ skills: ["coding"], agents: ["antigravity"] });
+    expect(JSON.parse(await fs.readFile(genPath(), "utf8")).entries[0].include_only).toEqual(["research"]);
+    expect(JSON.parse(await fs.readFile(skillsJsonPath(), "utf8")).inherits).toHaveLength(2);
+
+    await remove({ skills: ["research"] });
+    await expect(fs.access(genPath())).rejects.toThrow();
+    expect(JSON.parse(await fs.readFile(skillsJsonPath(), "utf8"))).toEqual({
+      inherits: [{ path: "~/keep-me.json" }],
+      entries: [{ path: "~/manual" }],
+    });
+    expect((await readState(hub.statePath)).manifests ?? []).toEqual([]);
   });
 });

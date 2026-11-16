@@ -22,7 +22,8 @@ export type ErrorCode =
   | "IMPORT_PENDING"
   | "NO_PENDING_IMPORT"
   | "MERGE_UNRESOLVED"
-  | "IMPORT_SOURCE_CHANGED";
+  | "IMPORT_SOURCE_CHANGED"
+  | "SKILLS_JSON_INVALID";
 
 /** Every failure core reports to callers. Callers map it to output and exit codes. */
 export class SkillsymError extends Error {

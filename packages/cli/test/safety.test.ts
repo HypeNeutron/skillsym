@@ -195,6 +195,7 @@ describe("commands that only look", () => {
       ["sync", "--dry-run"],
       ["import", "--dry-run"],
       ["eject", "--dry-run"],
+      ["migrate", "--dry-run"],
       ["add", lib, "--dry-run", "-a", "claude"],
       ["status", "--json"],
     ];

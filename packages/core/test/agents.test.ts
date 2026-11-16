@@ -5,6 +5,7 @@ import {
   addSkill,
   assignSkills,
   builtinAgents,
+  isAgentInstalled,
   loadProfiles,
   openHub,
   planLinkGroups,
@@ -121,7 +122,7 @@ describe("custom agent profiles from config.json", () => {
     await assign(["windsurf"]);
 
     expect(await readLinkTarget(dir(".windsurf", "skills", "coding"))).toBe(hubSkill());
-    expect(profiles.map((p) => p.id)).toEqual(["claude", "codex", "cursor", "universal", "windsurf"]);
+    expect(profiles.map((p) => p.id)).toEqual(["claude", "codex", "cursor", "gemini", "antigravity", "universal", "windsurf"]);
   });
 
   it("replaces a built-in agent with the same id", async () => {
@@ -142,7 +143,51 @@ describe("custom agent profiles from config.json", () => {
   });
 
   it("uses only the built-ins when there is no config", async () => {
-    expect((await loadProfiles(hub, userHome)).map((p) => p.id)).toEqual(["claude", "codex", "cursor", "universal"]);
+    expect((await loadProfiles(hub, userHome)).map((p) => p.id)).toEqual([
+      "claude",
+      "codex",
+      "cursor",
+      "gemini",
+      "antigravity",
+      "universal",
+    ]);
+  });
+
+  it("detects antigravity via ~/.gemini/config or ~/.gemini/antigravity, and gemini only via ~/.gemini/skills", async () => {
+    const ag = profiles.find((p) => p.id === "antigravity")!;
+    const gm = profiles.find((p) => p.id === "gemini")!;
+    expect(ag.delivery).toBe("skills-json");
+    expect(await isAgentInstalled(ag)).toBe(false);
+    expect(await isAgentInstalled(gm)).toBe(false);
+
+    await fs.mkdir(dir(".gemini"), { recursive: true });
+    await fs.writeFile(dir(".gemini", "settings.json"), "{}");
+    expect(await isAgentInstalled(gm)).toBe(false);
+
+    await fs.mkdir(dir(".gemini", "config"), { recursive: true });
+    expect(await isAgentInstalled(ag)).toBe(true);
+
+    await fs.mkdir(dir(".gemini", "skills"), { recursive: true });
+    expect(await isAgentInstalled(gm)).toBe(true);
+  });
+
+  it("planLinkGroups excludes skills-json agents so antigravity is never covered by universal", () => {
+    const groups = planLinkGroups(profiles);
+    expect(groups.flatMap((g) => g.agents.map((a) => a.id))).not.toContain("antigravity");
+  });
+
+  it("loads a custom agent with delivery: skills-json and expands ~ in skillsJsonPath", async () => {
+    await writeConfig({
+      version: 1,
+      agents: [{ id: "myide", delivery: "skills-json", skillsDir: "~/.myide/skills", skillsJsonPath: "~/.myide/skills.json" }],
+    });
+    const loaded = await loadProfiles(hub, userHome);
+    const custom = loaded.find((p) => p.id === "myide")!;
+    expect(custom).toMatchObject({
+      delivery: "skills-json",
+      skillsDir: dir(".myide", "skills"),
+      skillsJsonPath: dir(".myide", "skills.json"),
+    });
   });
 
   it.each([
@@ -152,6 +197,8 @@ describe("custom agent profiles from config.json", () => {
     ["bad id", JSON.stringify({ version: 1, agents: [{ id: "has space", skillsDir: "~/x" }] })],
     ["duplicate id", JSON.stringify({ version: 1, agents: [{ id: "x", skillsDir: "~/x" }, { id: "x", skillsDir: "~/y" }] })],
     ["bad reload", JSON.stringify({ version: 1, agents: [{ id: "x", skillsDir: "~/x", reload: "sometimes" }] })],
+    ["bad delivery", JSON.stringify({ version: 1, agents: [{ id: "x", skillsDir: "~/x", delivery: "ftp" }] })],
+    ["skills-json missing skillsJsonPath", JSON.stringify({ version: 1, agents: [{ id: "x", skillsDir: "~/x", delivery: "skills-json" }] })],
   ])("rejects an invalid config (%s)", async (_label, text) => {
     await fs.writeFile(hub.configPath, text);
     const err = await loadProfiles(hub, userHome).catch((e: unknown) => e);

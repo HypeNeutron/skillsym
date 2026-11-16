@@ -244,6 +244,20 @@ Examples:
   skillsym config
   skillsym config add windsurf ~/.windsurf/skills
   skillsym config remove windsurf`,
+
+  migrate: `Usage: skillsym migrate [options]
+
+Migrate legacy Antigravity setup (custom "gemini" config, old junctions, and broad whole-folder entries in skills.json)
+to built-in "antigravity" skills-json delivery. Backs up every edited file first and leaves custom entries and real
+folders untouched.
+
+Options:
+  -dr, --dry-run     Show what migrate would change; change nothing
+  -y, --yes          Do not ask first
+
+Examples:
+  skillsym migrate --dry-run
+  skillsym migrate`,
 };
 
 const ALIASES: Record<string, string> = { ls: "list", rm: "remove", library: "lib" };

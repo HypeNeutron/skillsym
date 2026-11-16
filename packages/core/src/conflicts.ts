@@ -1,13 +1,15 @@
 import { randomBytes } from "node:crypto";
 import { promises as fs } from "node:fs";
 import path from "node:path";
-import { moveAside } from "./backup.js";
+import { builtinAgents, type AgentProfile } from "./agents.js";
+import { copyToBackup, moveAside } from "./backup.js";
 import { replaceHubVersion } from "./hub-version.js";
-import { pathExists } from "./fsutil.js";
+import { isFile, pathExists } from "./fsutil.js";
 import type { Hub } from "./hub.js";
 import { createDirLink, readLinkTarget, removeDirLink } from "./links.js";
 import { withLock } from "./lock.js";
 import { readManifest, writeManifest, type Manifest } from "./manifest.js";
+import { applySkillsJsonDelivery, generatedManifestPath } from "./skills-json.js";
 import { isValidSkillName } from "./skills.js";
 import { restoreLibrarySkill } from "./snapshots.js";
 import { readState, samePath, writeState, type State } from "./state.js";
@@ -37,6 +39,13 @@ const CHOICES: Record<SyncConflictType, ConflictChoice[]> = {
 
 export function choicesFor(type: SyncConflictType): ConflictChoice[] {
   return [...CHOICES[type]];
+}
+
+export function choicesForConflict(conflict: SyncConflict): ConflictChoice[] {
+  if (conflict.delivery === "skills-json" && conflict.type === "replaced-different") {
+    return ["restore", "skip"];
+  }
+  return choicesFor(conflict.type);
 }
 
 /** Default name for a forked skill: the original name plus the first agent's id. */
@@ -74,6 +83,7 @@ export async function resolveConflicts(hub: Hub, decisions: ConflictDecision[], 
   return withLock(
     hub.lockPath,
     async () => {
+      const profiles = options.profiles ?? builtinAgents();
       const { conflicts } = await planSync(hub, options);
       const manifest = await readManifest(hub.manifestPath);
       const state = await readState(hub.statePath);
@@ -88,12 +98,13 @@ export async function resolveConflicts(hub: Hub, decisions: ConflictDecision[], 
           continue;
         }
         result.conflict = conflict;
-        if (!CHOICES[conflict.type].includes(decision.choice)) {
-          result.error = `"${decision.choice}" is not available for ${conflict.type}; choose one of: ${CHOICES[conflict.type].join(", ")}`;
+        const allowed = choicesForConflict(conflict);
+        if (!allowed.includes(decision.choice)) {
+          result.error = `"${decision.choice}" is not available for ${conflict.type}; choose one of: ${allowed.join(", ")}`;
           continue;
         }
         try {
-          await resolveOne(hub, manifest, state, conflict, decision, result);
+          await resolveOne(hub, manifest, state, profiles, conflict, decision, result);
           result.ok = true;
         } catch (err) {
           result.error = (err as Error).message;
@@ -112,10 +123,14 @@ async function resolveOne(
   hub: Hub,
   manifest: Manifest,
   state: State,
+  profiles: AgentProfile[],
   conflict: SyncConflict,
   decision: ConflictDecision,
   result: ConflictResolution,
 ): Promise<void> {
+  if (conflict.delivery === "skills-json") {
+    return resolveSkillsJsonConflict(hub, manifest, state, profiles, conflict, decision, result);
+  }
   const target = path.join(hub.skillsDir, conflict.skill);
   const label = conflict.agents.join("+");
 
@@ -196,4 +211,58 @@ async function stageAgentCopy(hub: Hub, conflict: SyncConflict): Promise<string>
 function unassign(manifest: Manifest, conflict: SyncConflict): void {
   const entry = manifest.skills[conflict.skill];
   if (entry) entry.agents = entry.agents.filter((a) => !conflict.agents.includes(a));
+}
+
+async function resolveSkillsJsonConflict(
+  hub: Hub,
+  manifest: Manifest,
+  state: State,
+  profiles: AgentProfile[],
+  conflict: SyncConflict,
+  decision: ConflictDecision,
+  result: ConflictResolution,
+): Promise<void> {
+  const agentId = conflict.agents[0];
+  const agent = profiles.find((p) => p.id === agentId);
+  if (!agent) throw new Error(`Unknown agent "${agentId}"`);
+
+  switch (decision.choice) {
+    case "skip":
+      return;
+    case "restore": {
+      if (conflict.type === "source-missing") {
+        const source = manifest.skills[conflict.skill]?.source;
+        if (!source) throw new Error(`"${conflict.skill}" does not say which library it came from`);
+        await restoreLibrarySkill(hub, conflict.skill, source);
+        result.library = source;
+        await applySkillsJsonDelivery(hub, agent, manifest, state, { forceOverwrite: true });
+        return;
+      }
+      const genPath = generatedManifestPath(hub, agent.id);
+      if (conflict.type === "replaced-different" && (await isFile(genPath))) {
+        result.backups.push(await copyToBackup(hub, genPath, agent.id, path.basename(genPath)));
+      }
+      if (conflict.type === "missing-owned" && agent.skillsJsonPath && (await isFile(agent.skillsJsonPath))) {
+        result.backups.push(await copyToBackup(hub, agent.skillsJsonPath, agent.id, path.basename(agent.skillsJsonPath)));
+      }
+      const applied = await applySkillsJsonDelivery(hub, agent, manifest, state, { forceOverwrite: true });
+      if (!applied.ok) throw new Error(applied.reason);
+      return;
+    }
+    case "drop": {
+      const names = conflict.skill.split(",").map((s) => s.trim()).filter(Boolean);
+      for (const name of names) {
+        const entry = manifest.skills[name];
+        if (entry) entry.agents = entry.agents.filter((a) => a !== agent.id);
+      }
+      if (agent.skillsJsonPath && (await isFile(agent.skillsJsonPath))) {
+        result.backups.push(await copyToBackup(hub, agent.skillsJsonPath, agent.id, path.basename(agent.skillsJsonPath)));
+      }
+      const applied = await applySkillsJsonDelivery(hub, agent, manifest, state, { forceOverwrite: true });
+      if (!applied.ok) throw new Error(applied.reason);
+      return;
+    }
+    default:
+      throw new Error(`"${decision.choice}" is not available for skills-json conflicts`);
+  }
 }

@@ -1,5 +1,5 @@
 import path from "node:path";
-import { builtinAgents, groupBySkillsDir, resolveAgents, type AgentProfile } from "./agents.js";
+import { agentDelivery, builtinAgents, groupBySkillsDir, resolveAgents, type AgentProfile } from "./agents.js";
 import { backupStamp, moveToBackup } from "./backup.js";
 import { SkillsymError } from "./errors.js";
 import { isDirectory, pathExists } from "./fsutil.js";
@@ -9,6 +9,7 @@ import { readLinkTarget, removeDirLink } from "./links.js";
 import { withLock, type LockOptions } from "./lock.js";
 import { readManifest, writeManifest, type Manifest } from "./manifest.js";
 import { expandSkillNames } from "./skills.js";
+import { findStateManifest, generatedManifestPath, hasInheritsRef, readGeneratedFile, readTargetSkillsJson, refreshSkillsJsonManifests } from "./skills-json.js";
 import { removeLibrarySnapshot } from "./snapshots.js";
 import { readState, samePath, writeState, type State } from "./state.js";
 
@@ -82,6 +83,8 @@ export async function removeSkills(hub: Hub, options: RemoveOptions): Promise<Re
         await removeOne(hub, manifest, state, profiles, name, dropIds, options.dryRun ?? false, result, stamp);
       }
       if (!options.dryRun) {
+        const affectedProfiles = dropIds ? profiles.filter((p) => dropIds.includes(p.id)) : profiles;
+        await refreshSkillsJsonManifests(hub, affectedProfiles, manifest, state, { forceOverwrite: true });
         await writeState(hub.statePath, state);
         await writeManifest(hub.manifestPath, manifest);
       }
@@ -112,7 +115,9 @@ async function removeOne(
   }
 
   const handled: string[] = [];
-  for (const group of groupBySkillsDir(assigned)) {
+  const assignedLinks = assigned.filter((p) => agentDelivery(p) === "link");
+  const assignedJson = assigned.filter((p) => agentDelivery(p) === "skills-json" && drop.includes(p.id));
+  for (const group of groupBySkillsDir(assignedLinks)) {
     const ids = group.agents.map((a) => a.id);
     const dropped = ids.filter((id) => drop.includes(id));
     if (!dropped.length) continue;
@@ -123,6 +128,24 @@ async function removeOne(
       continue;
     }
     result.links.push({ skill: name, agents: dropped, path: linkPath, outcome: await unlinkIfOurs(state, linkPath, target, dryRun) });
+  }
+  for (const agent of assignedJson) {
+    const owned = findStateManifest(state, agent.id);
+    const gen = await readGeneratedFile(generatedManifestPath(hub, agent.id));
+    const targetJson = agent.skillsJsonPath ? await readTargetSkillsJson(agent.skillsJsonPath).catch(() => null) : null;
+    const delivered = Boolean(
+      owned?.skills.includes(name) &&
+        gen.exists &&
+        agent.skillsJsonPath &&
+        targetJson?.exists &&
+        hasInheritsRef(targetJson.rawObj, agent.skillsJsonPath, generatedManifestPath(hub, agent.id)),
+    );
+    result.links.push({
+      skill: name,
+      agents: [agent.id],
+      path: agent.skillsJsonPath ?? agent.skillsDir,
+      outcome: delivered ? "unlinked" : "not-linked",
+    });
   }
 
   if (!dropIds) {

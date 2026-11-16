@@ -2,10 +2,12 @@ import { promises as fs } from "node:fs";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
+  addLibrary,
   addSkill,
   assignSkills,
   builtinAgents,
   eject,
+  generatedManifestPath,
   hashSkillDir,
   openHub,
   readLinkTarget,
@@ -220,5 +222,43 @@ describe("eject by skill or agent", () => {
     await expect(eject(hub, { skills: ["nope"], profiles })).rejects.toThrow(/No skill named/);
     await expect(eject(hub, { agents: ["nope"], profiles })).rejects.toThrow();
     expect(await isLink(claude())).toBe(true);
+  });
+});
+
+describe("eject with skills-json delivery", () => {
+  const agySkillsDir = (skill: string) => path.join(userHome, ".gemini", "config", "skills", skill);
+  const skillsJsonPath = () => path.join(userHome, ".gemini", "config", "skills.json");
+  const genPath = () => generatedManifestPath(hub, "antigravity");
+
+  it("eject -a antigravity copies real files (including --link skills) and removes inherits", async () => {
+    const lib = path.join(root, "lib");
+    await makeSkill(lib, "lib-skill", { "doc.md": "from lib" });
+    await addLibrary(hub, lib, { link: true, profiles });
+    await assignSkills(hub, { skills: ["coding", "lib-skill"], agents: ["antigravity"], profiles });
+
+    const preview = await eject(hub, { agents: ["antigravity"], profiles, dryRun: true });
+    expect(preview.results.every((r) => r.outcome === "ejected")).toBe(true);
+    await expect(fs.access(agySkillsDir("coding"))).rejects.toThrow();
+
+    const report = await eject(hub, { agents: ["antigravity"], profiles });
+    expect(report.results.every((r) => r.outcome === "ejected")).toBe(true);
+    expect((await fs.lstat(agySkillsDir("coding"))).isSymbolicLink()).toBe(false);
+    expect((await fs.lstat(agySkillsDir("lib-skill"))).isSymbolicLink()).toBe(false);
+    expect(await fs.readFile(path.join(agySkillsDir("lib-skill"), "doc.md"), "utf8")).toBe("from lib");
+    await expect(fs.access(genPath())).rejects.toThrow();
+    expect(JSON.parse(await fs.readFile(skillsJsonPath(), "utf8")).inherits).toBeUndefined();
+    // Library files stay untouched even when lib-skill leaves the hub
+    expect(await fs.readFile(path.join(lib, "lib-skill", "doc.md"), "utf8")).toBe("from lib");
+  });
+
+  it("full eject cleans up skills-json manifests and leaves real copies after hub deletion", async () => {
+    await assignSkills(hub, { skills: ["coding"], agents: ["antigravity"], profiles });
+    const codingHash = await hashSkillDir(path.join(hub.skillsDir, "coding"));
+
+    await eject(hub, { profiles });
+    await removeDir(hub.home);
+
+    expect(await hashSkillDir(agySkillsDir("coding"))).toBe(codingHash);
+    expect(JSON.parse(await fs.readFile(skillsJsonPath(), "utf8")).inherits).toBeUndefined();
   });
 });

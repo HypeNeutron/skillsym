@@ -1,16 +1,17 @@
 import { randomBytes } from "node:crypto";
 import { promises as fs } from "node:fs";
 import path from "node:path";
-import { builtinAgents, resolveAgents, type AgentProfile } from "./agents.js";
+import { agentDelivery, builtinAgents, resolveAgents, type AgentProfile } from "./agents.js";
 import { backupStamp, moveToBackup } from "./backup.js";
 import { SkillsymError } from "./errors.js";
-import { isDirectory, pathExists } from "./fsutil.js";
+import { isDirectory, pathExists, writeFileAtomic } from "./fsutil.js";
 import type { Hub } from "./hub.js";
 import { forgetLibrarySkill } from "./library.js";
 import { readLinkTarget, removeDirLink } from "./links.js";
 import { withLock, type LockOptions } from "./lock.js";
 import { readManifest, writeManifest, type Manifest } from "./manifest.js";
 import { expandSkillNames } from "./skills.js";
+import { forgetStateManifest, readTargetSkillsJson, refreshSkillsJsonManifests, removeInheritsRef } from "./skills-json.js";
 import { removeLibrarySnapshot } from "./snapshots.js";
 import { readState, samePath, writeState, type State, type StateLink } from "./state.js";
 
@@ -75,6 +76,7 @@ const STAGING_PREFIX = ".skillsym-eject-";
  */
 export async function eject(hub: Hub, options: EjectOptions = {}): Promise<EjectReport> {
   if (options.skills?.length || options.agents?.length) return ejectSelected(hub, options);
+  const profiles = options.profiles ?? builtinAgents();
   const run = async (): Promise<EjectReport> => {
     const state = await readState(hub.statePath);
     const results: EjectResult[] = [];
@@ -108,6 +110,52 @@ export async function eject(hub: Hub, options: EjectOptions = {}): Promise<Eject
       }
     }
 
+    for (const sm of [...(state.manifests ?? [])]) {
+      const agent = profiles.find((p) => p.id === sm.agent);
+      const skillsDir = agent?.skillsDir ?? path.join(path.dirname(sm.skillsJsonPath), "skills");
+      dirs.add(skillsDir);
+      let keepManifest = false;
+
+      for (const skill of sm.skills) {
+        const dest = path.join(skillsDir, skill);
+        const hubCopy = path.join(hub.skillsDir, skill);
+        let outcome: EjectOutcome;
+        if (await pathExists(dest)) outcome = "left-in-place";
+        else if (!(await isDirectory(hubCopy))) {
+          outcome = "hub-missing";
+          keepManifest = true;
+        } else outcome = "ejected";
+
+        const result: EjectResult = { skill, path: dest, outcome };
+        results.push(result);
+        if (options.dryRun || outcome !== "ejected") continue;
+
+        try {
+          const source = await fs.realpath(hubCopy);
+          await writeCopyAtomically(dest, source);
+        } catch (err) {
+          result.outcome = "failed";
+          result.error = (err as Error).message;
+          keepManifest = true;
+        }
+      }
+
+      if (!options.dryRun && !keepManifest) {
+        try {
+          const target = await readTargetSkillsJson(sm.skillsJsonPath);
+          if (target.exists) {
+            const removed = removeInheritsRef(target.rawObj, sm.skillsJsonPath, sm.generatedPath);
+            if (removed.changed) await writeFileAtomic(sm.skillsJsonPath, JSON.stringify(removed.obj, null, 2) + "\n");
+          }
+          await fs.rm(sm.generatedPath, { force: true });
+          forgetStateManifest(state, sm.agent);
+          await writeState(hub.statePath, state);
+        } catch (err) {
+          results.push({ skill: sm.skills[0] ?? sm.agent, path: sm.skillsJsonPath, outcome: "failed", error: (err as Error).message });
+        }
+      }
+    }
+
     if (!options.dryRun) {
       await clearAssignments(hub, results);
       for (const dir of dirs) await removeStaleStaging(dir);
@@ -134,11 +182,14 @@ async function ejectSelected(hub: Hub, options: EjectOptions): Promise<EjectRepo
 
     const report: EjectReport = { results: [], hubHome: hub.home, leftHub: [] };
     const stamp = backupStamp();
+    const touchedJsonAgents = new Set<AgentProfile>();
     for (const name of names) {
       const entry = manifest.skills[name]!;
       const drop = chosen ? entry.agents.filter((a) => chosen.includes(a)) : [...entry.agents];
       const keep = profiles.filter((p) => entry.agents.includes(p.id) && !drop.includes(p.id));
-      const dropDirs = profiles.filter((p) => drop.includes(p.id)).map((p) => p.skillsDir);
+      const dropLinkAgents = profiles.filter((p) => drop.includes(p.id) && agentDelivery(p) === "link");
+      const dropJsonAgents = profiles.filter((p) => drop.includes(p.id) && agentDelivery(p) === "skills-json");
+      const dropDirs = dropLinkAgents.map((p) => p.skillsDir);
       // Without -a every link of the skill goes, including any the manifest no longer lists.
       const links = state.links.filter((l) => l.skill === name && (!chosen || dropDirs.some((d) => samePath(d, path.dirname(l.path)))));
       const ejectedDirs: string[] = [];
@@ -155,8 +206,14 @@ async function ejectSelected(hub: Hub, options: EjectOptions): Promise<EjectRepo
         if (result.outcome === "failed" || result.outcome === "hub-missing") failed = true;
         else ejectedDirs.push(dir);
       }
-      for (const p of profiles.filter((a) => drop.includes(a.id) && !links.some((l) => samePath(path.dirname(l.path), a.skillsDir)))) {
+      for (const p of dropLinkAgents.filter((a) => !links.some((l) => samePath(path.dirname(l.path), a.skillsDir)))) {
         report.results.push({ skill: name, path: path.join(p.skillsDir, name), outcome: "unassigned" });
+      }
+      for (const agent of dropJsonAgents) {
+        touchedJsonAgents.add(agent);
+        const result = await ejectSkillsJsonSkill(hub, agent, name, dryRun);
+        report.results.push(result);
+        if (result.outcome === "failed" || result.outcome === "hub-missing") failed = true;
       }
       if (failed) continue;
 
@@ -172,6 +229,10 @@ async function ejectSelected(hub: Hub, options: EjectOptions): Promise<EjectRepo
       else if (!dryRun && touched) entry.agents = remaining;
     }
     if (!dryRun) {
+      if (touchedJsonAgents.size) {
+        await refreshSkillsJsonManifests(hub, [...touchedJsonAgents], manifest, state, { forceOverwrite: true });
+        await writeState(hub.statePath, state);
+      }
       await writeManifest(hub.manifestPath, manifest);
       for (const dir of new Set(report.results.map((r) => path.dirname(r.path)))) await removeStaleStaging(dir);
     }
@@ -228,6 +289,32 @@ async function leaveHub(hub: Hub, manifest: Manifest, name: string, dryRun: bool
   return left;
 }
 
+async function ejectSkillsJsonSkill(hub: Hub, agent: AgentProfile, skill: string, dryRun: boolean): Promise<EjectResult> {
+  const dest = path.join(agent.skillsDir, skill);
+  const hubCopy = path.join(hub.skillsDir, skill);
+  if (await pathExists(dest)) return { skill, path: dest, outcome: "left-in-place" };
+  if (!(await isDirectory(hubCopy))) return { skill, path: dest, outcome: "hub-missing" };
+  if (dryRun) return { skill, path: dest, outcome: "ejected" };
+  try {
+    await writeCopyAtomically(dest, await fs.realpath(hubCopy));
+    return { skill, path: dest, outcome: "ejected" };
+  } catch (err) {
+    return { skill, path: dest, outcome: "failed", error: (err as Error).message };
+  }
+}
+
+async function writeCopyAtomically(dest: string, source: string): Promise<void> {
+  await fs.mkdir(path.dirname(dest), { recursive: true });
+  const staging = path.join(path.dirname(dest), `${STAGING_PREFIX}${randomBytes(6).toString("hex")}`);
+  await fs.cp(source, staging, { recursive: true, errorOnExist: true });
+  try {
+    await fs.rename(staging, dest);
+  } catch (err) {
+    await fs.rm(staging, { recursive: true, force: true });
+    throw err;
+  }
+}
+
 /**
  * Copy first (next to the link, so the final rename stays on one volume), then swap: the link is
  * only removed once a complete copy exists.
@@ -253,7 +340,7 @@ async function clearAssignments(hub: Hub, results: EjectResult[]): Promise<void>
   const manifest = await readManifest(hub.manifestPath);
   let changed = false;
   for (const [name, entry] of Object.entries(manifest.skills)) {
-    if (!entry.agents.length || state.links.some((l) => l.skill === name)) continue;
+    if (!entry.agents.length || state.links.some((l) => l.skill === name) || (state.manifests ?? []).some((m) => m.skills.includes(name))) continue;
     if (results.some((r) => r.skill === name && r.outcome === "failed")) continue;
     entry.agents = [];
     changed = true;

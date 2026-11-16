@@ -2,11 +2,14 @@ import { promises as fs } from "node:fs";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
+  addLibrary,
   addSkill,
   assignSkills,
   builtinAgents,
+  generatedManifestPath,
   hashSkillDir,
   listSkills,
+  loadProfiles,
   openHub,
   readLinkTarget,
   readManifest,
@@ -163,5 +166,100 @@ describe("assign leaves things it did not create alone", () => {
   it("rejects skills that are not in the hub before changing anything", async () => {
     await expectCode(assign(["coding", "nope"], ["claude"]), "SKILL_NOT_IN_HUB");
     expect(await readLinkTarget(path.join(claudeDir(), "coding"))).toBeNull();
+  });
+});
+
+describe("assign with skills-json delivery", () => {
+  const skillsJsonPath = () => path.join(userHome, ".gemini", "config", "skills.json");
+  const generatedPath = (id = "antigravity") => generatedManifestPath(hub, id);
+
+  it("writes <hub>/antigravity-skills.json, adds inherits to skills.json, and is idempotent", async () => {
+    const first = await assign(["coding"], ["antigravity"]);
+    expect(first.results).toEqual([
+      { skill: "coding", agents: ["antigravity"], path: skillsJsonPath(), outcome: "linked" },
+    ]);
+    expect(await fs.stat(path.join(userHome, ".gemini", "config", "skills")).catch(() => null)).toBeNull();
+
+    const gen = JSON.parse(await fs.readFile(generatedPath(), "utf8"));
+    expect(gen).toEqual({
+      entries: [{ path: hub.skillsDir.replace(/\\/g, "/"), include_only: ["coding"] }],
+    });
+    const target = JSON.parse(await fs.readFile(skillsJsonPath(), "utf8"));
+    expect(target).toEqual({
+      inherits: [{ path: generatedPath().replace(/\\/g, "/") }],
+      entries: [],
+    });
+
+    const state = await readState(hub.statePath);
+    expect(state.manifests).toHaveLength(1);
+    expect(state.manifests![0]).toMatchObject({
+      agent: "antigravity",
+      skillsJsonPath: skillsJsonPath(),
+      generatedPath: generatedPath(),
+      skills: ["coding"],
+    });
+    expect((await readManifest(hub.manifestPath)).skills.coding!.agents).toEqual(["antigravity"]);
+
+    const stateBefore = await fs.readFile(hub.statePath, "utf8");
+    const manifestBefore = await fs.readFile(hub.manifestPath, "utf8");
+    const second = await assign(["coding"], ["antigravity"]);
+    expect(second.results[0]!.outcome).toBe("already-linked");
+    expect(await fs.readFile(hub.statePath, "utf8")).toBe(stateBefore);
+    expect(await fs.readFile(hub.manifestPath, "utf8")).toBe(manifestBefore);
+  });
+
+  it("groups hub skills and --link library skills by real source folder while preserving existing skills.json entries", async () => {
+    await fs.mkdir(path.dirname(skillsJsonPath()), { recursive: true });
+    await fs.writeFile(
+      skillsJsonPath(),
+      JSON.stringify({ customFlag: true, inherits: [{ path: "~/other.json" }], entries: [{ path: "~/manual" }] }),
+    );
+    const lib = path.join(root, "my-lib");
+    await makeSkill(lib, "lib-skill");
+    await addLibrary(hub, lib, { link: true });
+
+    const { results } = await assign(["coding", "lib-skill"], ["antigravity"]);
+    expect(results.every((r) => r.outcome === "linked")).toBe(true);
+
+    const gen = JSON.parse(await fs.readFile(generatedPath(), "utf8"));
+    expect(gen.entries).toEqual([
+      { path: hub.skillsDir.replace(/\\/g, "/"), include_only: ["coding"] },
+      { path: lib.replace(/\\/g, "/"), include_only: ["lib-skill"] },
+    ]);
+    const target = JSON.parse(await fs.readFile(skillsJsonPath(), "utf8"));
+    expect(target).toEqual({
+      customFlag: true,
+      inherits: [{ path: "~/other.json" }, { path: generatedPath().replace(/\\/g, "/") }],
+      entries: [{ path: "~/manual" }],
+    });
+  });
+
+  it("blocks without overwriting when generated manifest was modified outside skillsym", async () => {
+    await assign(["coding"], ["antigravity"]);
+    await fs.writeFile(generatedPath(), '{"entries": [], "note": "manual edit"}\n');
+
+    const { results } = await assign(["research"], ["antigravity"]);
+    expect(results[0]).toMatchObject({ skill: "research", agents: ["antigravity"], outcome: "blocked" });
+    expect(await fs.readFile(generatedPath(), "utf8")).toContain("manual edit");
+    expect((await readManifest(hub.manifestPath)).skills.research!.agents).toEqual([]);
+  });
+
+  it("works for a custom skills-json agent in config.json", async () => {
+    await fs.writeFile(
+      hub.configPath,
+      JSON.stringify({
+        version: 1,
+        agents: [{ id: "custom-agy", delivery: "skills-json", skillsDir: "~/.custom/skills", skillsJsonPath: "~/.custom/skills.json" }],
+      }),
+    );
+    profiles = await loadProfiles(hub, userHome);
+    const { results } = await assign(["coding"], ["custom-agy"]);
+    expect(results[0]).toMatchObject({
+      skill: "coding",
+      agents: ["custom-agy"],
+      path: path.join(userHome, ".custom", "skills.json"),
+      outcome: "linked",
+    });
+    expect(JSON.parse(await fs.readFile(generatedPath("custom-agy"), "utf8")).entries[0].include_only).toEqual(["coding"]);
   });
 });

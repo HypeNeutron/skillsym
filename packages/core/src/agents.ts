@@ -4,26 +4,42 @@ import { SkillsymError } from "./errors.js";
 import { isDirectory } from "./fsutil.js";
 import { samePath } from "./state.js";
 
+export type DeliveryMode = "link" | "skills-json";
+
 export interface AgentProfile {
   id: string;
   displayName: string;
-  /** Folder skillsym links skills into for this agent (user scope). */
+  /** How skillsym delivers skills to this agent ("link" = directory links; "skills-json" = generated skills.json + inherits). Defaults to "link". */
+  delivery?: DeliveryMode;
+  /** Folder skillsym links skills into for this agent (user scope), or scans for unmanaged/ejected copies. */
   skillsDir: string;
+  /** Path to the agent's skills.json manifest (required when delivery is "skills-json"). */
+  skillsJsonPath?: string;
   /** Other folders the agent also loads skills from; used to avoid loading a skill twice. */
   alsoReads: string[];
-  /** Folder whose presence means the agent is installed. Absent = always counted as installed. */
+  /** Folder whose presence means the agent is installed. Absent (along with detectDirs) = always counted as installed. */
   detectDir?: string;
+  /** Candidate folders whose presence (any match) means the agent is installed. */
+  detectDirs?: string[];
   /** Whether the agent picks up edits to a skill without restarting. */
   reload: "live" | "restart" | "unknown";
   /** Entries in skillsDir the agent manages itself; skillsym never reports, imports or touches them. */
   reserved?: string[];
 }
 
+export function agentDelivery(agent: Pick<AgentProfile, "delivery">): DeliveryMode {
+  return agent.delivery ?? "link";
+}
+
 /**
- * Built-in profiles, verified on Windows in spike 01 (see the spec):
+ * Built-in profiles, verified on Windows in spike 01 and 2026-11-16 (see the spec):
  * - Codex reads ~/.agents/skills (documented) and ~/.codex/skills (observed), not ~/.claude/skills.
  * - Cursor reads its own folder plus Claude's, Codex's and ~/.agents/skills, recursively,
  *   and only at startup.
+ * - Antigravity (agy 1.5.9) skips Windows junctions in ~/.gemini/config/skills, so it delivers
+ *   through ~/.gemini/config/skills.json (inherits + include_only).
+ * - Gemini CLI reads junctions in ~/.gemini/skills and ~/.agents/skills; detected only when
+ *   ~/.gemini/skills exists so Antigravity-only users don't get it from leftover ~/.gemini files.
  */
 export function builtinAgents(homedir: string = os.homedir()): AgentProfile[] {
   const h = (...p: string[]) => path.join(homedir, ...p);
@@ -31,6 +47,7 @@ export function builtinAgents(homedir: string = os.homedir()): AgentProfile[] {
     {
       id: "claude",
       displayName: "Claude Code",
+      delivery: "link",
       skillsDir: h(".claude", "skills"),
       alsoReads: [],
       detectDir: h(".claude"),
@@ -41,6 +58,7 @@ export function builtinAgents(homedir: string = os.homedir()): AgentProfile[] {
     {
       id: "codex",
       displayName: "Codex",
+      delivery: "link",
       skillsDir: h(".agents", "skills"),
       alsoReads: [h(".codex", "skills")],
       detectDir: h(".codex"),
@@ -49,14 +67,35 @@ export function builtinAgents(homedir: string = os.homedir()): AgentProfile[] {
     {
       id: "cursor",
       displayName: "Cursor",
+      delivery: "link",
       skillsDir: h(".cursor", "skills"),
       alsoReads: [h(".claude", "skills"), h(".codex", "skills"), h(".agents", "skills")],
       detectDir: h(".cursor"),
       reload: "restart",
     },
     {
+      id: "gemini",
+      displayName: "Gemini CLI",
+      delivery: "link",
+      skillsDir: h(".gemini", "skills"),
+      alsoReads: [h(".agents", "skills")],
+      detectDir: h(".gemini", "skills"),
+      reload: "restart",
+    },
+    {
+      id: "antigravity",
+      displayName: "Antigravity",
+      delivery: "skills-json",
+      skillsDir: h(".gemini", "config", "skills"),
+      skillsJsonPath: h(".gemini", "config", "skills.json"),
+      alsoReads: [],
+      detectDirs: [h(".gemini", "config"), h(".gemini", "antigravity")],
+      reload: "restart",
+    },
+    {
       id: "universal",
       displayName: "Universal (~/.agents/skills)",
+      delivery: "link",
       skillsDir: h(".agents", "skills"),
       alsoReads: [],
       reload: "unknown",
@@ -94,8 +133,9 @@ export interface LinkGroup {
  * Callers should only honour `coveredBy` when the covering group's link is actually in place.
  */
 export function planLinkGroups(agents: AgentProfile[]): LinkGroup[] {
+  const linkOnly = agents.filter((a) => agentDelivery(a) === "link");
   const reads = (g: LinkGroup) => Math.max(...g.agents.map((a) => a.alsoReads.length));
-  const order: LinkGroup[] = groupBySkillsDir(agents).sort((a, b) => reads(a) - reads(b));
+  const order: LinkGroup[] = groupBySkillsDir(linkOnly).sort((a, b) => reads(a) - reads(b));
   const linked: LinkGroup[] = [];
   for (const group of order) {
     const provider = linked.find((p) => group.agents.every((a) => a.alsoReads.some((r) => samePath(r, p.dir))));
@@ -106,6 +146,10 @@ export function planLinkGroups(agents: AgentProfile[]): LinkGroup[] {
 }
 
 export async function isAgentInstalled(agent: AgentProfile): Promise<boolean> {
+  if (agent.detectDirs?.length) {
+    for (const dir of agent.detectDirs) if (await isDirectory(dir)) return true;
+    return false;
+  }
   return agent.detectDir === undefined || (await isDirectory(agent.detectDir));
 }
 

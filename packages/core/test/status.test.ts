@@ -2,9 +2,11 @@ import { promises as fs } from "node:fs";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
+  addLibrary,
   addSkill,
   assignSkills,
   builtinAgents,
+  generatedManifestPath,
   hashSkillDir,
   openHub,
   readManifest,
@@ -192,5 +194,84 @@ describe("hashSkillDir", () => {
     await fs.writeFile(path.join(a, "x.bin"), Buffer.from([0, 13, 10, 1]));
     await fs.writeFile(path.join(b, "x.bin"), Buffer.from([0, 10, 1]));
     expect(await hashSkillDir(a)).not.toBe(await hashSkillDir(b));
+  });
+});
+
+describe("status with skills-json delivery", () => {
+  const skillsJsonPath = () => path.join(userHome, ".gemini", "config", "skills.json");
+  const genPath = () => generatedManifestPath(hub, "antigravity");
+
+  it("reports synced, missing (unowned vs owned), replaced, orphaned, source-missing, unmanaged, and warnings", async () => {
+    await assignSkills(hub, { skills: ["coding"], agents: ["antigravity"], profiles });
+    let report = await scan();
+    expect(report.entries.find((e) => e.agents.includes("antigravity"))).toMatchObject({
+      skill: "coding",
+      status: "synced",
+      owned: true,
+      delivery: "skills-json",
+    });
+
+    // Unowned manifest drift (new skill added to manifest.json directly)
+    await setAgents("research", ["antigravity"]);
+    report = await scan();
+    expect(report.entries.find((e) => e.skill === "research" && e.agents.includes("antigravity"))).toMatchObject({
+      status: "missing",
+      owned: false,
+    });
+
+    // Unassigned in manifest -> orphaned
+    await setAgents("coding", []);
+    report = await scan();
+    expect(report.entries.find((e) => e.skill === "coding" && e.delivery === "skills-json")).toMatchObject({
+      status: "orphaned",
+      owned: true,
+    });
+    await setAgents("coding", ["antigravity"]);
+    await setAgents("research", []);
+
+    // External edit to generated manifest -> replaced
+    const origGen = await fs.readFile(genPath(), "utf8");
+    await fs.writeFile(genPath(), '{"entries": [], "edited": true}\n');
+    report = await scan();
+    expect(report.entries.find((e) => e.skill === "coding" && e.agents.includes("antigravity"))).toMatchObject({
+      status: "replaced",
+      owned: true,
+      sameContent: false,
+    });
+    await fs.writeFile(genPath(), origGen);
+
+    // User deleted inherits -> missing-owned
+    await fs.writeFile(skillsJsonPath(), JSON.stringify({ entries: [{ path: hub.skillsDir }] }));
+    report = await scan();
+    expect(report.entries.find((e) => e.skill === "coding" && e.agents.includes("antigravity"))).toMatchObject({
+      status: "missing",
+      owned: true,
+    });
+    expect(report.warnings.some((w) => w.code === "SKILLS_JSON_BROAD_ENTRY")).toBe(true);
+
+    // Unmanaged real folder in ~/.gemini/config/skills
+    await makeSkill(path.join(userHome, ".gemini", "config", "skills"), "local-agy");
+    report = await scan();
+    expect(report.unmanaged).toContainEqual(expect.objectContaining({ name: "local-agy", agents: ["antigravity"] }));
+
+    // --link skill with missing library -> source-missing
+    const lib = path.join(root, "lib");
+    await makeSkill(lib, "lib-skill");
+    await addLibrary(hub, lib, { link: true });
+    await assignSkills(hub, { skills: ["lib-skill"], agents: ["antigravity"], profiles });
+    await fs.rm(lib, { recursive: true, force: true });
+    report = await scan();
+    expect(report.entries.find((e) => e.skill === "lib-skill" && e.agents.includes("antigravity"))).toMatchObject({
+      status: "source-missing",
+    });
+  });
+
+  it("warns when config.json maps gemini to Antigravity's skills folder", async () => {
+    await fs.writeFile(
+      hub.configPath,
+      JSON.stringify({ version: 1, agents: [{ id: "gemini", skillsDir: "~/.gemini/config/skills" }] }),
+    );
+    const report = await scan();
+    expect(report.warnings.some((w) => w.code === "LEGACY_GEMINI_CONFIG")).toBe(true);
   });
 });

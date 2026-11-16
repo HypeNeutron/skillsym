@@ -1,12 +1,14 @@
 import { promises as fs } from "node:fs";
 import path from "node:path";
-import { builtinAgents, type AgentProfile } from "./agents.js";
-import { moveAside } from "./backup.js";
-import { isDirectory } from "./fsutil.js";
+import { agentDelivery, builtinAgents, type AgentProfile, type DeliveryMode } from "./agents.js";
+import { copyToBackup, moveAside } from "./backup.js";
+import { isDirectory, isFile } from "./fsutil.js";
 import { hashSkillDir } from "./hash.js";
 import type { Hub } from "./hub.js";
 import { createDirLink, readLinkTarget, removeDirLink } from "./links.js";
 import { withLock, type LockOptions } from "./lock.js";
+import { readManifest, writeManifest, type Manifest } from "./manifest.js";
+import { applySkillsJsonDelivery, generatedManifestPath } from "./skills-json.js";
 import { readState, samePath, writeState, type State } from "./state.js";
 import { refreshLibrarySnapshots } from "./snapshots.js";
 import { filterStatus, scanStatus, type StatusEntry } from "./status.js";
@@ -25,7 +27,11 @@ export type SyncActionType =
   /** A recorded link is no longer ours on disk (gone or replaced): forget it, touch nothing. */
   | "forget"
   /** A correct link to the hub that state.json does not know about: record it. */
-  | "record";
+  | "record"
+  /** Write or update the agent's generated skills.json manifest + inherits ref. */
+  | "update-manifest"
+  /** Remove the inherits ref and generated skills.json file when no skills remain assigned. */
+  | "unlink-manifest";
 
 export interface SyncAction {
   type: SyncActionType;
@@ -52,6 +58,8 @@ export interface SyncConflict {
   agents: string[];
   path: string;
   message: string;
+  /** Delivery mode for this conflict (omitted or "link" for directory links). */
+  delivery?: DeliveryMode;
 }
 
 export interface SyncPlan {
@@ -92,8 +100,12 @@ export async function planSync(hub: Hub, options: SyncOptions = {}): Promise<Syn
     ...(options.agents ? { agents: options.agents } : {}),
   });
   const state = await readState(hub.statePath);
+  const manifest = await readManifest(hub.manifestPath);
   const plan: SyncPlan = { actions: [], conflicts: [] };
-  for (const e of entries) await planEntry(hub, state, e, plan);
+  const linkEntries = entries.filter((e) => e.delivery !== "skills-json");
+  const jsonEntries = entries.filter((e) => e.delivery === "skills-json");
+  for (const e of linkEntries) await planEntry(hub, state, e, plan);
+  planSkillsJsonEntries(profiles, manifest, jsonEntries, plan);
   return plan;
 }
 
@@ -102,10 +114,12 @@ export async function sync(hub: Hub, options: SyncOptions = {}): Promise<SyncRes
   return withLock(
     hub.lockPath,
     async () => {
+      const profiles = options.profiles ?? builtinAgents();
       const plan = await planSync(hub, options);
       const state = await readState(hub.statePath);
+      const manifest = await readManifest(hub.manifestPath);
       const results: SyncActionResult[] = [];
-      for (const action of plan.actions) results.push(await apply(hub, state, action));
+      for (const action of plan.actions) results.push(await apply(hub, state, manifest, profiles, action));
       // Nothing to do means nothing is written, not even an identical state file.
       if (plan.actions.length) await writeState(hub.statePath, state);
       return { ...plan, results, snapshotFailed: await refreshLibrarySnapshots(hub) };
@@ -155,7 +169,94 @@ async function planEntry(hub: Hub, state: State, e: StatusEntry, plan: SyncPlan)
   }
 }
 
-async function apply(hub: Hub, state: State, action: SyncAction): Promise<SyncActionResult> {
+function planSkillsJsonEntries(profiles: AgentProfile[], manifest: Manifest, entries: StatusEntry[], plan: SyncPlan): void {
+  const byAgent = new Map<AgentProfile, StatusEntry[]>();
+  for (const e of entries) {
+    const agent = profiles.find(
+      (p) =>
+        agentDelivery(p) === "skills-json" &&
+        p.skillsJsonPath !== undefined &&
+        (samePath(p.skillsJsonPath, e.path) || e.path.toLowerCase().startsWith(`${p.skillsJsonPath.toLowerCase()}#`)),
+    );
+    if (!agent) continue;
+    byAgent.set(agent, [...(byAgent.get(agent) ?? []), e]);
+  }
+
+  for (const [agent, group] of byAgent) {
+    const skillsJsonPath = agent.skillsJsonPath!;
+    for (const sm of group.filter((e) => e.status === "source-missing")) {
+      plan.conflicts.push({
+        type: "source-missing",
+        skill: sm.skill,
+        agents: [agent.id],
+        path: sm.path,
+        message: "the library folder this skill is linked from is gone; if you moved the library, run `skillsym add <new library path> --link`",
+        delivery: "skills-json",
+      });
+    }
+
+    const blocked = group.filter((e) => e.status === "blocked");
+    if (blocked.length) {
+      plan.conflicts.push({
+        type: "blocked",
+        skill: blocked.map((e) => e.skill).join(", "),
+        agents: [agent.id],
+        path: skillsJsonPath,
+        message: `${skillsJsonPath} is not valid JSON; fix it manually before skillsym updates inherits`,
+        delivery: "skills-json",
+      });
+      continue;
+    }
+
+    const replaced = group.filter((e) => e.status === "replaced");
+    if (replaced.length) {
+      if (replaced.every((e) => e.sameContent)) {
+        plan.actions.push({
+          type: "update-manifest",
+          skill: replaced.map((e) => e.skill).join(", "),
+          agents: [agent.id],
+          path: skillsJsonPath,
+        });
+      } else {
+        plan.conflicts.push({
+          type: "replaced-different",
+          skill: replaced.map((e) => e.skill).join(", "),
+          agents: [agent.id],
+          path: skillsJsonPath,
+          message: "skillsym's generated skills-json manifest was modified outside skillsym",
+          delivery: "skills-json",
+        });
+      }
+      continue;
+    }
+
+    const missingOwned = group.filter((e) => e.status === "missing" && e.owned);
+    if (missingOwned.length) {
+      plan.conflicts.push({
+        type: "missing-owned",
+        skill: missingOwned.map((e) => e.skill).join(", "),
+        agents: [agent.id],
+        path: skillsJsonPath,
+        message: "skillsym's inherits entry or generated manifest was removed; restore it or drop the assignment",
+        delivery: "skills-json",
+      });
+      continue;
+    }
+
+    const needsSync = group.filter((e) => (e.status === "missing" && !e.owned) || e.status === "orphaned");
+    if (!needsSync.length) continue;
+
+    const assignedLeft = Object.keys(manifest.skills).some((name) => manifest.skills[name]!.agents.includes(agent.id));
+    plan.actions.push({
+      type: assignedLeft ? "update-manifest" : "unlink-manifest",
+      skill: needsSync.map((e) => e.skill).join(", "),
+      agents: [agent.id],
+      path: skillsJsonPath,
+    });
+  }
+}
+
+async function apply(hub: Hub, state: State, manifest: Manifest, profiles: AgentProfile[], action: SyncAction): Promise<SyncActionResult> {
   const target = path.join(hub.skillsDir, action.skill);
   try {
     switch (action.type) {
@@ -183,6 +284,21 @@ async function apply(hub: Hub, state: State, action: SyncAction): Promise<SyncAc
       case "record":
         await recordLink(state, action, target, process.platform === "win32" ? "junction" : "symlink");
         return { ...action, ok: true };
+      case "update-manifest":
+      case "unlink-manifest": {
+        const agent = profiles.find((p) => p.id === action.agents[0]);
+        if (!agent) return { ...action, ok: false, error: `Unknown agent "${action.agents[0]}"` };
+        const genPath = generatedManifestPath(hub, agent.id);
+        let backup: string | undefined;
+        // If generated file existed without matching state (e.g. identical manual copy), back it up first.
+        const owned = (state.manifests ?? []).find((m) => m.agent === agent.id);
+        if (action.type === "update-manifest" && !owned && (await isFile(genPath))) {
+          backup = await copyToBackup(hub, genPath, agent.id, path.basename(genPath));
+        }
+        const applied = await applySkillsJsonDelivery(hub, agent, manifest, state, { forceOverwrite: true });
+        if (!applied.ok) return { ...action, ok: false, error: applied.reason };
+        return { ...action, ok: true, ...(backup ? { backup } : {}) };
+      }
     }
   } catch (err) {
     return { ...action, ok: false, error: (err as Error).message };

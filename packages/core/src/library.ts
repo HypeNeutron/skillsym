@@ -1,5 +1,6 @@
 import { promises as fs } from "node:fs";
 import path from "node:path";
+import { builtinAgents, type AgentProfile } from "./agents.js";
 import { backupStamp, moveToBackup } from "./backup.js";
 import { SkillsymError } from "./errors.js";
 import { isDirectory, isFile, pathExists } from "./fsutil.js";
@@ -9,6 +10,7 @@ import { createDirLink, readLinkTarget, removeDirLink } from "./links.js";
 import { withLock, type LockOptions } from "./lock.js";
 import { readManifest, writeManifest, type Manifest } from "./manifest.js";
 import { copyIntoHub, isValidSkillName, type SkillInfo } from "./skills.js";
+import { refreshSkillsJsonManifests } from "./skills-json.js";
 import { refreshLibrarySnapshots } from "./snapshots.js";
 import { samePath } from "./state.js";
 
@@ -75,6 +77,7 @@ export interface LibraryPlan {
 export interface LibraryOptions {
   /** Link hub entries to the library (the library stays the source of truth) instead of copying. */
   link?: boolean;
+  profiles?: AgentProfile[];
   lock?: LockOptions;
 }
 
@@ -165,6 +168,9 @@ export async function addLibrary(hub: Hub, libraryPath: string, options: Library
         manifest.libraries = kept;
         await writeManifest(hub.manifestPath, manifest);
         snapshotFailed.push(...(await refreshLibrarySnapshots(hub)));
+        if (plan.items.some((i) => i.type === "repoint" || i.type === "adopt")) {
+          await refreshSkillsJsonManifests(hub, options.profiles ?? builtinAgents(), manifest);
+        }
       }
       return { ...plan, added, snapshotFailed };
     },
