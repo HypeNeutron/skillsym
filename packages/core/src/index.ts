@@ -42,7 +42,7 @@ export {
   type SkillsJsonEntry,
   type DesiredSkillsJson,
 } from "./skills-json.js";
-export { addConfigAgent, removeConfigAgent, ensureConfig, loadProfiles, readConfig, CONFIG_VERSION, type Config, type AgentConfig } from "./config.js";
+export { addConfigAgent, writeNewSkillsAgents, removeConfigAgent, ensureConfig, loadProfiles, readConfig, CONFIG_VERSION, type Config, type AgentConfig } from "./config.js";
 export { hashSkillDir, hasUtf8Bom } from "./hash.js";
 export {
   scanStatus,
