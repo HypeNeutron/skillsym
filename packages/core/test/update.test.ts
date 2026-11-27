@@ -144,7 +144,7 @@ describe("updateSkills & planUpdate", () => {
 
   it("updates skills added from a local git repository", async () => {
     const bare = path.join(root, "bare.git");
-    await runGit(["init", "--bare", bare]);
+    await runGit(["init", "--bare", "-b", "main", bare]);
     const localAuthor = path.join(root, "author");
     await initRepo(localAuthor, { localgit: { "body.md": "v1\n" } });
     await runGit(["remote", "add", "origin", pathToFileURL(bare).toString()], localAuthor);

@@ -156,7 +156,7 @@ describe("syncRemoteClone & inspectLocalGitSource", () => {
 
   it("inspects local git repositories including origin remote if present", async () => {
     const bare = path.join(root, "bare.git");
-    await runGit(["init", "--bare", bare]);
+    await runGit(["init", "--bare", "-b", "main", bare]);
     const localRepo = path.join(root, "local-repo");
     const c1 = await initGitRepo(localRepo);
     await runGit(["remote", "add", "origin", pathToFileURL(bare).toString()], localRepo);
