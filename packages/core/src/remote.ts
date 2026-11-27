@@ -608,8 +608,12 @@ export async function inspectLocalGitSource(dir: string, git: GitRunner = runGit
   if (!(await isDirectory(absDir)) || !(await isInGit(absDir))) return null;
   let root: string;
   let commit: string;
+  let subpath: string;
   try {
     root = path.resolve((await git(["rev-parse", "--show-toplevel"], absDir)).trim());
+    // Ask git for the folder's place in the repo: git's root is a real path, so path.relative() from it
+    // breaks when `dir` came through a symlink (/var on macOS) or an 8.3 short name (RUNNER~1 on Windows).
+    subpath = (await git(["rev-parse", "--show-prefix"], absDir)).trim().replace(/\/+$/, "");
     commit = (await git(["rev-parse", "HEAD"], root)).trim();
   } catch {
     return null;
@@ -620,7 +624,7 @@ export async function inspectLocalGitSource(dir: string, git: GitRunner = runGit
   } catch {
     url = undefined;
   }
-  return { root, ...(url ? { url } : {}), commit, subpath: toPosixPath(path.relative(root, absDir)) };
+  return { root, ...(url ? { url } : {}), commit, subpath };
 }
 
 export interface DiscoverOriginOptions {
