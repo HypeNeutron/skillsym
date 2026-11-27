@@ -1,8 +1,9 @@
 import { spawn } from "node:child_process";
-import { lstatSync, readFileSync } from "node:fs";
+import { lstatSync, readFileSync, watch as fsWatch } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { parseArgs } from "node:util";
+import { startWatching, type WatchRun } from "./watch.js";
 import { complete, completionScript, COMPLETION_SHELLS } from "./completion.js";
 import { commandHelp } from "./help.js";
 import {
@@ -140,6 +141,7 @@ Commands:
                                 count. --all also lists links that are fine (synced, covered); --only lists these
                                 statuses, comma-separated; names and -a narrow it to those skills and agents
   check                         Same as status, but exit 1 if anything is not synced (for CI and scripts)
+  watch [-a <agents>]           Keep running: register and link skills you create in the hub's skills folder
   sync [skill...] [-a <agents>] [--dry-run]
                                 Make the agents' folders match the manifest (with names or -a, only those);
                                 asks about conflicts
@@ -215,6 +217,7 @@ export const COMMAND_OPTIONS: Record<string, string[]> = {
   lib: ["dry-run", "yes"],
   library: ["dry-run", "yes"],
   migrate: ["dry-run", "yes"],
+  watch: ["agent"],
 };
 const GLOBAL_OPTIONS = ["json", "help", "version", "global", "project"];
 
@@ -410,7 +413,7 @@ async function run(argv: string[], io: Io, json: boolean): Promise<ExitCode> {
     return 0;
   }
 
-  const writes = (["add", "assign", "sync", "update", "remove", "rm", "import", "eject", "migrate"].includes(command) && !values["dry-run"]) || (command === "config" && rest.length > 0) || ((command === "lib" || command === "library") && ["unlink", "rm", "remove"].includes(rest[0] ?? "") && !values["dry-run"]);
+  const writes = (["add", "assign", "sync", "update", "remove", "rm", "import", "eject", "migrate", "watch"].includes(command) && !values["dry-run"]) || (command === "config" && rest.length > 0) || ((command === "lib" || command === "library") && ["unlink", "rm", "remove"].includes(rest[0] ?? "") && !values["dry-run"]);
   // Only commands that change something create the hub; status, list and --dry-run leave the disk alone.
   const home = resolveHubHome({ env: io.env });
   const hub = writes ? await openHub(home) : hubPaths(home);
@@ -834,6 +837,11 @@ async function run(argv: string[], io: Io, json: boolean): Promise<ExitCode> {
       if (json) io.stdout(JSON.stringify({ configPath: hub.configPath, exists, agents: rows }));
       else io.stdout(formatConfig(hub.configPath, exists, rows));
       return 0;
+    }
+    case "watch": {
+      if (json) throw new UsageError("watch does not take --json: it prints a line per event until you press Ctrl+C");
+      if (rest.length) throw new UsageError("watch takes no names: skillsym watch [-a <agents>]");
+      return runWatch(hub, agents, io, userHome(io.env));
     }
     case "migrate": {
       if (rest.length) throw new UsageError("migrate takes no positional arguments: skillsym migrate [--dry-run] [-y]");
@@ -1647,6 +1655,41 @@ function formatStatus(report: StatusReport, showAll: boolean, filtered: boolean)
   const hidden = !showAll && report.entries.some((e) => healthy(e.status));
   if (summary.length) lines.push("", `${summary.join(", ")}.${report.clean ? "" : " Drift found."}${hidden ? " `skillsym status --all` lists every link." : ""}`);
   return lines.join("\n").replace(/\n{3,}/g, "\n\n").trimStart();
+}
+
+/** Run `skillsym watch` until Ctrl+C. Never asks: new skills go to -a, or to config.json's newSkills.agents. */
+async function runWatch(hub: Hub, agents: string[], io: Io, homedir: string): Promise<ExitCode> {
+  const run = async (): Promise<WatchRun> => {
+    const choice: SyncOptions = { profiles: await loadProfiles(hub, homedir), ...(agents.length ? { agents } : {}) };
+    // -a names the agents for new skills too; without it the saved newSkills.agents decides.
+    if (agents.length) {
+      const preview = await planSync(hub, choice);
+      choice.newSkillAgents = Object.fromEntries(preview.unregistered.filter((u) => !u.reason).map((u) => [u.name, agents]));
+    }
+    const result = await sync(hub, choice);
+    const lines = result.registrations.map((r) => `registered ${r.skill} -> ${r.agents.join(", ")}`);
+    for (const r of result.results) {
+      lines.push(r.ok ? `${ACTION_TEXT[r.type][1]} ${r.skill} -> ${r.agents.join(", ") || "(unassigned)"}` : `FAILED ${r.skill}: ${r.error}`);
+    }
+    for (const c of result.conflicts) lines.push(`CONFLICT ${c.skill}: ${c.message}; run \`skillsym sync\` to decide`);
+    return { lines, unregistered: result.unregistered };
+  };
+  const watching = startWatching({
+    watch: (onEvent) => {
+      const w = fsWatch(hub.skillsDir, { recursive: true }, () => onEvent());
+      w.on("error", (err) => io.stderr(`watch: ${err.message}`));
+      return w;
+    },
+    run,
+    print: (line) => io.stdout(line),
+  });
+  io.stdout(`Watching ${hub.skillsDir}; press Ctrl+C to stop.`);
+  await new Promise<void>((resolve) => {
+    process.once("SIGINT", resolve);
+    process.once("SIGTERM", resolve);
+  });
+  watching.close();
+  return 0;
 }
 
 const ACTION_TEXT: Record<SyncAction["type"], [string, string]> = {

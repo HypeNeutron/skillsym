@@ -274,6 +274,23 @@ Examples:
   skillsym config add windsurf ~/.windsurf/skills
   skillsym config remove windsurf`,
 
+  watch: `Usage: skillsym watch [options]
+
+Keep running and watch the hub's skills folder. A skill folder you create there is registered and linked to your agents
+about 2 seconds after the changes stop; one sync also runs at start, which catches skills made while watch was off.
+It never asks: new skills go to the agents in -a, or in config.json's newSkills.agents. With neither, it prints one
+line per new skill and leaves it alone. If another skillsym command holds the hub, it tries again shortly.
+Press Ctrl+C to stop. To start it at login, see the README.
+
+Options:
+  -a, --agent <ids>  Link new skills to these agents (and only sync these); '*' = every installed agent
+
+watch takes no --dry-run, --json or -y.
+
+Examples:
+  skillsym watch
+  skillsym watch -a claude,codex`,
+
   migrate: `Usage: skillsym migrate [options]
 
 Migrate legacy Antigravity setup (custom "gemini" config, old junctions, and broad whole-folder entries in skills.json)

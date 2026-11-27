@@ -3,6 +3,9 @@
 ## Unreleased
 
 ### Added
+- **Skills created directly in the hub**: `status` and `check` list hub folders that are not in the manifest as "Not registered" (`check` exits 1, `--json` has `unregistered`); `assign` registers such a folder in place and links it. Loose files, `.`/`tmp*` folders, folders without `SKILL.md` and invalid names are ignored; a `SKILL.md` `name:` that differs from the folder is reported and never registered.
+- **`newSkills.agents` in `config.json`**: `sync` registers new hub skills and links them to these agents (`"*"` = every installed agent). When unset, interactive `sync` asks which agents should get each new skill and can save the answer; `-y`, `--json` and non-interactive runs only report and exit 1.
+- **`skillsym watch [-a agents]`**: watches the hub's skills folder, registers and links new skills 2 seconds after changes settle (one sync at start), never asks, and retries when another command holds the hub. README has login snippets for Task Scheduler, launchd and systemd.
 - **`skills-json` delivery & built-in `antigravity` agent**: `antigravity` delivers skills via `<hub>/antigravity-skills.json` (grouped by source folder with `include_only`, including real library parent paths for `--link` skills) and a single `inherits` reference in `~/.gemini/config/skills.json`, preserving user entries and supporting `assign`, `status`, `check`, `sync`, `remove`, `import`, `lib`, and `eject`.
 - **Built-in `gemini` agent**: Gemini CLI (`~/.gemini/skills`, `alsoReads: ["~/.agents/skills"]`), detected when `~/.gemini/skills` exists.
 - **Configurable `delivery` and `skillsJsonPath`**: custom agents in `config.json` can set `"delivery": "skills-json"` and `"skillsJsonPath"`.
