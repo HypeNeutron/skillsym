@@ -66,7 +66,6 @@ import {
   isInGit,
   addConfigAgent,
   removeConfigAgent,
-  expandSkillNames,
   filterStatus,
   SkillsymError,
   sync,
@@ -505,8 +504,8 @@ async function run(argv: string[], io: Io, json: boolean): Promise<ExitCode> {
         entries: chosen.entries.filter((e) => !only.length || only.includes(e.status)),
         unmanaged: chosen.unmanaged.filter(() => !only.length || only.includes("unmanaged")),
         // Hub folders belong to no agent: a skill or agent filter narrows them away, --only keeps them when asked.
-        unregistered: report.unregistered.filter(
-          (u) => !values.agent?.length && (!skills.length || expandSkillNames(skills, [u.name]).includes(u.name)) && (!only.length || only.includes("unregistered")),
+        unregistered: report.unregistered.filter((u) => !values.agent?.length && (!only.length || only.includes("unregistered"))).filter(
+          (u) => !skills.length || skillMatches(skills, u.name),
         ),
       };
       // What is clean depends on what was asked about; a report on everything keeps its library checks.
@@ -1555,6 +1554,14 @@ function entryHint(e: StatusReport["entries"][number]): string {
   if (e.status === "missing" && e.owned) hint = "skillsym's link was removed; `skillsym sync` will ask whether to restore it or drop the assignment";
   if (e.status === "replaced") hint += e.sameContent ? " by an identical copy; `skillsym sync` will re-link it" : " by different content; `skillsym sync` will ask";
   return hint;
+}
+
+/** Whether `name` is one of the skill names or patterns ("*" any characters, "?" one); unlike expandSkillNames, no match is not an error. */
+function skillMatches(requested: string[], name: string): boolean {
+  return requested.some((r) => {
+    const source = r.replace(/[.+^${}()|[\]\\]/g, "\\$&").replace(/\*/g, ".*").replace(/\?/g, ".");
+    return new RegExp(`^${source}$`).test(name);
+  });
 }
 
 function formatStatus(report: StatusReport, showAll: boolean, filtered: boolean): string {

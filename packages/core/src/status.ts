@@ -267,7 +267,7 @@ export async function filterStatus(hub: Hub, report: StatusReport, filter: Statu
   let wanted: Set<string> | undefined;
   if (filter.skills?.length) {
     const manifest = await readManifest(hub.manifestPath);
-    const known = [...new Set([...Object.keys(manifest.skills), ...report.entries.map((e) => e.skill), ...report.unmanaged.map((u) => u.name)])];
+    const known = [...new Set([...Object.keys(manifest.skills), ...report.entries.map((e) => e.skill), ...report.unmanaged.map((u) => u.name), ...report.unregistered.map((u) => u.name)])];
     wanted = new Set(expandSkillNames(filter.skills, known));
     for (const name of wanted) {
       if (!known.includes(name)) throw new SkillsymError("SKILL_NOT_IN_HUB", `No skill named "${name}" in the hub or your agents' folders.`, { skill: name });

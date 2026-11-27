@@ -5,12 +5,15 @@ import {
   addSkill,
   assignSkills,
   builtinAgents,
+  filterStatus,
   hashSkillDir,
   listUnregisteredSkills,
   openHub,
+  planUpdate,
   readLinkTarget,
   readManifest,
   registerHubSkill,
+  runGit,
   scanStatus,
   SkillsymError,
   type AgentProfile,
@@ -103,6 +106,26 @@ describe("unregistered hub skills", () => {
     expect(await listUnregisteredSkills(hub, await readManifest(hub.manifestPath))).toEqual([]);
     await fs.rm(hub.skillsDir, { recursive: true });
     expect(await listUnregisteredSkills(hub, await readManifest(hub.manifestPath))).toEqual([]);
+  });
+
+  it("filterStatus accepts the name of an unregistered hub skill", async () => {
+    await makeSkill(hub.skillsDir, "foo");
+    const report = await scan();
+    await expect(filterStatus(hub, report, { profiles, skills: ["foo"] })).resolves.toBeDefined();
+    await expectCode(filterStatus(hub, report, { profiles, skills: ["nope"] }), "SKILL_NOT_IN_HUB");
+  });
+
+  it("records no source, so a hub that is a git repo is not taken for the skill's origin", async () => {
+    await runGit(["init", "-b", "main"], hub.home);
+    await runGit(["config", "user.email", "test@skillsym.dev"], hub.home);
+    await runGit(["config", "user.name", "SkillSym Test"], hub.home);
+    await makeSkill(hub.skillsDir, "foo");
+    await runGit(["add", "."], hub.home);
+    await runGit(["commit", "-m", "v1"], hub.home);
+    await registerHubSkill(hub, "foo");
+    expect((await readManifest(hub.manifestPath)).skills.foo).not.toHaveProperty("source");
+    const plan = await planUpdate(hub, { profiles, fetch: false });
+    expect(plan.items.filter((i) => i.skill === "foo" && i.status !== "local-only")).toEqual([]);
   });
 
   describe("assign", () => {

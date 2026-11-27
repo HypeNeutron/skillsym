@@ -158,7 +158,7 @@ export async function registerHubSkillLocked(
     agents: [],
     mode: "link",
     scope: "user",
-    source: dest,
+    // No `source`: the hub may itself be a git repo, and update would take it for the skill's origin.
     sourceHash: await hashSkillDir(dest),
     ...(remote ? { remote } : {}),
     ...(upstreams.length ? { upstreams } : {}),
