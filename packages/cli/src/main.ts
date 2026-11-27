@@ -503,9 +503,13 @@ async function run(argv: string[], io: Io, json: boolean): Promise<ExitCode> {
         ...report,
         entries: chosen.entries.filter((e) => !only.length || only.includes(e.status)),
         unmanaged: chosen.unmanaged.filter(() => !only.length || only.includes("unmanaged")),
+        // Hub folders belong to no agent: a skill or agent filter narrows them away, --only keeps them when asked.
+        unregistered: report.unregistered.filter((u) => !values.agent?.length && (!only.length || only.includes("unregistered"))).filter(
+          (u) => !skills.length || skillMatches(skills, u.name),
+        ),
       };
       // What is clean depends on what was asked about; a report on everything keeps its library checks.
-      if (filtered || only.length) view.clean = view.entries.every((e) => e.status === "synced" || e.status === "covered");
+      if (filtered || only.length) view.clean = view.entries.every((e) => e.status === "synced" || e.status === "covered") && !view.unregistered.length;
       if (json) io.stdout(JSON.stringify(view));
       else {
         io.stdout(formatStatus(view, Boolean(values.all) || only.length > 0, filtered || only.length > 0));
@@ -1526,7 +1530,7 @@ const STATUS_HINT: Record<StatusReport["entries"][number]["status"], string> = {
 };
 
 /** Fine first, so what needs attention ends up next to the summary. */
-const STATUS_ORDER = ["synced", "covered", "missing", "dangling", "replaced", "blocked", "orphaned", "duplicate", "source-missing", "unmanaged"];
+const STATUS_ORDER = ["synced", "covered", "missing", "dangling", "replaced", "blocked", "orphaned", "duplicate", "source-missing", "unmanaged", "unregistered"];
 
 function entryHint(e: StatusReport["entries"][number]): string {
   let hint = STATUS_HINT[e.status];
@@ -1552,10 +1556,18 @@ function entryHint(e: StatusReport["entries"][number]): string {
   return hint;
 }
 
+/** Whether `name` is one of the skill names or patterns ("*" any characters, "?" one); unlike expandSkillNames, no match is not an error. */
+function skillMatches(requested: string[], name: string): boolean {
+  return requested.some((r) => {
+    const source = r.replace(/[.+^${}()|[\]\\]/g, "\\$&").replace(/\*/g, ".*").replace(/\?/g, ".");
+    return new RegExp(`^${source}$`).test(name);
+  });
+}
+
 function formatStatus(report: StatusReport, showAll: boolean, filtered: boolean): string {
   const lines: string[] = [];
   if (!report.entries.length && !filtered) lines.push("No skills assigned yet. Assign one with: skillsym assign <skill> -a <agents>");
-  if (!report.entries.length && !report.unmanaged.length && filtered) lines.push("Nothing matches.");
+  if (!report.entries.length && !report.unmanaged.length && !report.unregistered.length && filtered) lines.push("Nothing matches.");
   const healthy = (s: string) => s === "synced" || s === "covered";
   for (const status of STATUS_ORDER) {
     if (!showAll && healthy(status)) continue;
@@ -1587,6 +1599,15 @@ function formatStatus(report: StatusReport, showAll: boolean, filtered: boolean)
     }
     lines.push(`  bring them in with \`skillsym import\`${listNames ? "" : "; `skillsym status --only unmanaged` lists them"}`);
   }
+  if (report.unregistered.length) {
+    if (lines.length) lines.push("");
+    lines.push(`NOT REGISTERED (${report.unregistered.length})`);
+    const width = Math.max(...report.unregistered.map((u) => u.name.length));
+    for (const u of report.unregistered) {
+      lines.push(`  ${u.name.padEnd(width)}  (${u.path})${u.reason === "name-mismatch" ? "\n      SKILL.md names it differently than its folder; rename one so they match" : ""}`);
+    }
+    lines.push("  in the hub but not in the manifest; register and link with `skillsym sync` or `skillsym assign <name> -a <agents>`");
+  }
   if (lines.length) lines.push("");
   const libraries = filtered ? { missing: [], newSkills: [], missingLibraries: [], folders: [] } : report.libraries;
   for (const m of libraries.missing.filter((m) => !report.entries.some((e) => e.skill === m.skill))) {
@@ -1610,6 +1631,7 @@ function formatStatus(report: StatusReport, showAll: boolean, filtered: boolean)
   for (const e of report.entries) counts.set(e.status, (counts.get(e.status) ?? 0) + 1);
   const summary = [...counts].map(([s, n]) => `${n} ${s}`);
   if (report.unmanaged.length) summary.push(`${report.unmanaged.length} unmanaged`);
+  if (report.unregistered.length) summary.push(`${report.unregistered.length} not registered`);
   const hidden = !showAll && report.entries.some((e) => healthy(e.status));
   if (summary.length) lines.push("", `${summary.join(", ")}.${report.clean ? "" : " Drift found."}${hidden ? " `skillsym status --all` lists every link." : ""}`);
   return lines.join("\n").replace(/\n{3,}/g, "\n\n").trimStart();

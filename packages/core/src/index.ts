@@ -17,7 +17,7 @@ export { withLock, type LockOptions } from "./lock.js";
 export { hasLibrarySnapshot, refreshLibrarySnapshots } from "./snapshots.js";
 export { findLibrary, listLibraries, removeLibrary, unlinkLibrary, type LibraryInfo, type UnlinkResult, type UnlinkedSkill } from "./libraries.js";
 export { isInGit } from "./library.js";
-export { addSkill, listSkills, replaceHubSkillFromSource, isValidSkillName, expandSkillNames, type SkillInfo, type AddSkillOptions } from "./skills.js";
+export { addSkill, listSkills, listUnregisteredSkills, registerHubSkill, type UnregisteredSkill, replaceHubSkillFromSource, isValidSkillName, expandSkillNames, type SkillInfo, type AddSkillOptions } from "./skills.js";
 export {
   agentDelivery,
   builtinAgents,
