@@ -6,7 +6,7 @@ import { pathExists } from "./fsutil.js";
 import { hashSkillDir } from "./hash.js";
 import type { Hub } from "./hub.js";
 import { createDirLink, readLinkTarget } from "./links.js";
-import { expandSkillNames } from "./skills.js";
+import { expandSkillNames, listUnregisteredSkills, registerHubSkillLocked } from "./skills.js";
 import { applySkillsJsonDelivery, findStateManifest, hasInheritsRef, readGeneratedFile, readTargetSkillsJson } from "./skills-json.js";
 import { withLock, type LockOptions } from "./lock.js";
 import { readManifest, writeManifest } from "./manifest.js";
@@ -59,9 +59,16 @@ export async function assignSkills(hub: Hub, options: AssignOptions): Promise<As
   return withLock(
     hub.lockPath,
     async () => {
-      const manifest = await readManifest(hub.manifestPath);
+      let manifest = await readManifest(hub.manifestPath);
       const state = await readState(hub.statePath);
-      const skillNames = expandSkillNames(options.skills, Object.keys(manifest.skills));
+      // A skill folder written straight into the hub is registered first. A name-mismatch one is only
+      // reached by naming it, and registering it throws; "*" and patterns skip it.
+      const unregistered = await listUnregisteredSkills(hub, manifest);
+      const ok = unregistered.filter((u) => !u.reason).map((u) => u.name);
+      const skillNames = expandSkillNames(options.skills, [...Object.keys(manifest.skills), ...ok]);
+      const toRegister = unregistered.map((u) => u.name).filter((n) => skillNames.includes(n) || options.skills.includes(n));
+      for (const name of toRegister) await registerHubSkillLocked(hub, name, { profiles });
+      if (toRegister.length) manifest = await readManifest(hub.manifestPath);
       for (const name of skillNames) {
         if (!manifest.skills[name]) {
           throw new SkillsymError("SKILL_NOT_IN_HUB", `No skill named "${name}" in the hub. Add it first: skillsym add <path>`, {

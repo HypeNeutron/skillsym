@@ -1143,3 +1143,20 @@ describe("skillsym CLI", () => {
     expect(run(["update", "orchestrator", "--dry-run"]).code).toBe(0);
   });
 });
+
+describe("unregistered hub skills", () => {
+  it("status lists them and check exits 1 until assign registers the skill", async () => {
+    run(["add", await makeSkill(path.join(root, "src"), "coding"), "-a", "claude"]);
+    await makeSkill(path.join(home, "skills"), "foo");
+
+    expect(run(["check"]).code).toBe(1);
+    const status = run(["status"]);
+    expect(status.code).toBe(0);
+    expect(status.stdout).toContain("NOT REGISTERED (1)");
+    expect(status.stdout).toContain("skillsym assign <name>");
+    expect(JSON.parse(run(["status", "--json"]).stdout).unregistered).toMatchObject([{ name: "foo" }]);
+
+    expect(run(["assign", "foo", "-a", "claude"]).code).toBe(0);
+    expect(run(["check"]).code).toBe(0);
+  });
+});

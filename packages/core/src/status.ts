@@ -20,7 +20,7 @@ import {
   serializeSkillsJson,
   type SkillsJsonEntry,
 } from "./skills-json.js";
-import { expandSkillNames, isValidSkillName } from "./skills.js";
+import { expandSkillNames, isValidSkillName, listUnregisteredSkills, type UnregisteredSkill } from "./skills.js";
 import { readState, samePath, type State, type StateLink } from "./state.js";
 
 export type LinkStatus =
@@ -92,9 +92,11 @@ export interface LibraryReport {
 export interface StatusReport {
   entries: StatusEntry[];
   unmanaged: UnmanagedEntry[];
+  /** Skill folders in the hub that are not in the manifest; `sync` or `assign` registers them. */
+  unregistered: UnregisteredSkill[];
   libraries: LibraryReport;
   warnings: StatusWarning[];
-  /** True when every entry is synced or covered (unmanaged skills do not count as drift). */
+  /** True when every entry is synced or covered and no hub folder is unregistered (unmanaged skills do not count as drift). */
   clean: boolean;
 }
 
@@ -200,8 +202,9 @@ export async function scanStatus(hub: Hub, options: ScanOptions = {}): Promise<S
   }
 
   const unmanaged = await findUnmanaged(profiles, [...expectedPaths, ...state.links.map((l) => l.path)]);
-  const clean = entries.every((e) => e.status === "synced" || e.status === "covered") && !libraries.missing.length;
-  return { entries, unmanaged, libraries, warnings, clean };
+  const unregistered = await listUnregisteredSkills(hub, manifest);
+  const clean = entries.every((e) => e.status === "synced" || e.status === "covered") && !libraries.missing.length && !unregistered.length;
+  return { entries, unmanaged, unregistered, libraries, warnings, clean };
 }
 
 async function classify(
