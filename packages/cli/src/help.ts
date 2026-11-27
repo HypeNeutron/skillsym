@@ -119,11 +119,15 @@ Examples:
 Make the agents' folders match the manifest. Fixes what it can decide alone and asks about the rest; run it twice
 and the second run changes nothing. Questions: Enter skips one, q skips the rest, Ctrl+C cancels.
 
+A folder you created directly in the hub's skills folder is a new skill: sync registers it and links it to the agents
+in config.json's newSkills.agents ("*" = every installed agent). If that is not set, sync asks which agents should
+get it; with -y or without a terminal it only reports the folder and exits 1.
+
 Options:
   -a, --agent <ids>  Only these agents
   -s, --skill <name> Skill names, instead of listing them first
   -dr, --dry-run     Show what would change; change nothing
-  -y, --yes          Never ask: conflicts are reported and left alone
+  -y, --yes          Never ask: conflicts and new hub skills are reported and left alone
 
 Names may be patterns: * means any characters, ? one. Keep the quotes.
 
@@ -261,6 +265,9 @@ Without arguments, show the config file's location and every agent with its skil
   config remove <id>        Take an agent out; refused while skills are assigned to it. Its files are not touched
 
 To change a folder, or to set other fields such as alsoReads, edit the config file.
+
+"newSkills": { "agents": ["claude", "codex"] } sets which agents sync links a skill newly found in the hub to
+("*" = every installed agent). Without it, sync asks; the question can save its answer here.
 
 Examples:
   skillsym config

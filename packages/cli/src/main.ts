@@ -65,6 +65,7 @@ import {
   hasLibrarySnapshot,
   isInGit,
   addConfigAgent,
+  writeNewSkillsAgents,
   removeConfigAgent,
   filterStatus,
   SkillsymError,
@@ -95,6 +96,7 @@ import {
   type SyncAction,
   type SyncActionResult,
   type SyncConflict,
+  type SyncOptions,
 } from "@skillsym/core";
 
 /** 0 = success / no drift, 1 = drift or unresolved conflict, 2 = usage error or failure. */
@@ -532,26 +534,36 @@ async function run(argv: string[], io: Io, json: boolean): Promise<ExitCode> {
           if (migrated) activeProfiles = await loadProfiles(hub, userHome(io.env));
         }
       }
-      const choice = { profiles: activeProfiles, ...(skills.length ? { skills } : {}), ...(agents.length ? { agents } : {}) };
+      const choice: SyncOptions = { profiles: activeProfiles, ...(skills.length ? { skills } : {}), ...(agents.length ? { agents } : {}) };
       if (values["dry-run"]) {
         const plan = await planSync(hub, choice);
         if (json) io.stdout(JSON.stringify({ dryRun: true, ...plan }));
-        else io.stdout(formatSync(plan.actions, plan.conflicts, true));
-        return plan.conflicts.length ? 1 : 0;
+        else io.stdout(formatSync(plan.actions, plan.conflicts, true, plan.registrations, plan.unregistered));
+        return plan.conflicts.length || plan.unregistered.length ? 1 : 0;
+      }
+      // Only the person answers for a new skill; without a saved setting and a way to ask, it is just reported.
+      if (canAsk) {
+        const preview = await planSync(hub, choice);
+        if (preview.unregistered.some((u) => !u.reason)) {
+          const answers = await askNewSkills(hub, preview.unregistered.filter((u) => !u.reason), io, activeProfiles);
+          if (Object.keys(answers).length) choice.newSkillAgents = answers;
+        }
       }
       const result = await sync(hub, choice);
       if (!json && result.snapshotFailed.length) io.stderr(`warning: could not update the library snapshot of ${result.snapshotFailed.join(", ")}.`);
       if (json) io.stdout(JSON.stringify({ dryRun: false, ...result }));
       // About to ask about conflicts with nothing else to report: "Already in sync" would be untrue.
-      else if (result.results.length || !result.conflicts.length || !canAsk) io.stdout(formatSync(result.results, canAsk ? [] : result.conflicts, false));
+      else if (result.results.length || result.registrations.length || result.unregistered.length || !result.conflicts.length || !canAsk) {
+        io.stdout(formatSync(result.results, canAsk ? [] : result.conflicts, false, result.registrations, result.unregistered));
+      }
       const failed = result.results.some((r) => !r.ok);
-      if (!result.conflicts.length || !canAsk) return failed ? 2 : result.conflicts.length ? 1 : 0;
+      if (!result.conflicts.length || !canAsk) return failed ? 2 : result.conflicts.length || result.unregistered.length ? 1 : 0;
 
       const resolutions = await askAndResolve(hub, result.conflicts, io, activeProfiles);
       io.stdout(formatResolutions(resolutions));
       if (resolutions.some((r) => r.choice === "skip")) io.stdout("\nSkipped conflicts are unchanged. Run `skillsym sync` again whenever you want to decide them.");
       if (failed || resolutions.some((r) => !r.ok)) return 2;
-      return resolutions.some((r) => r.choice === "skip") ? 1 : 0;
+      return resolutions.some((r) => r.choice === "skip") || result.unregistered.length ? 1 : 0;
     }
     case "update": {
       if (agents.length && values.agent?.length) throw new UsageError("update does not take -a; agent links already point to the hub");
@@ -1649,8 +1661,73 @@ const ACTION_TEXT: Record<SyncAction["type"], [string, string]> = {
   "unlink-manifest": ["would remove skills-json manifest", "removed skills-json manifest"],
 };
 
-function formatSync(actions: (SyncAction | SyncActionResult)[], conflicts: SyncConflict[], dryRun: boolean): string {
+/**
+ * Ask, per new hub skill, which agents get it. Returns the agents chosen by skill name; a skill the
+ * person skips ("not now") is left out and stays unregistered. A saved answer applies to later skills too.
+ */
+async function askNewSkills(hub: Hub, found: { name: string }[], io: Io, profiles: AgentProfile[]): Promise<Record<string, string[]>> {
+  const answers: Record<string, string[]> = {};
+  const configIds = (await readConfig(hub.configPath)).agents.map((a) => a.id);
+  const installed: string[] = [];
+  const registered: string[] = [];
+  for (const p of profiles) {
+    const here = await isAgentInstalled(p);
+    if (here) installed.push(p.id);
+    if (here || configIds.includes(p.id)) registered.push(p.id);
+  }
+  for (const u of found) {
+    if (answers[u.name]) continue;
+    const choice = (
+      await io.ask!(
+        [
+          `New skill found in the hub: ${u.name}. Which agents should get it?`,
+          `1) Every installed agent (${installed.join(", ")})  (default)`,
+          "2) Choose agents",
+          "3) Not now — leave it unregistered and ask again next sync",
+          "> ",
+        ].join("\n"),
+      )
+    ).trim();
+    if (choice === "3") continue;
+    let picked: string[];
+    if (choice === "2") {
+      const list = registered.map((id, i) => `${i + 1}) ${id}`).join("  ");
+      const reply = await io.ask!(`Agents (comma-separated numbers): ${list}\n> `);
+      picked = [...new Set(reply.split(",").map((s) => registered[Number(s.trim()) - 1]).filter((id): id is string => id !== undefined))];
+      if (!picked.length) {
+        io.stdout("No agent chosen; leaving it unregistered.");
+        continue;
+      }
+    } else if (choice === "" || choice === "1") picked = ["*"];
+    else {
+      io.stdout(`"${choice}" is not one of the choices; leaving it unregistered.`);
+      continue;
+    }
+    const future = (await io.ask!("Use this answer for future new skills too? (y/N) ")).trim().toLowerCase();
+    if (future === "y" || future === "yes") await writeNewSkillsAgents(hub, picked);
+    for (const f of found) if (future === "y" || future === "yes" || f.name === u.name) answers[f.name] = picked;
+  }
+  return answers;
+}
+
+function formatSync(
+  actions: (SyncAction | SyncActionResult)[],
+  conflicts: SyncConflict[],
+  dryRun: boolean,
+  registrations: { skill: string; agents: string[] }[] = [],
+  unregistered: { name: string; path: string; reason?: string }[] = [],
+): string {
   const lines: string[] = [];
+  for (const r of registrations) lines.push(`${dryRun ? "would register" : "registered"}  ${r.skill} -> ${r.agents.join(", ")}  (new hub skill)`);
+  for (const u of unregistered) {
+    lines.push(
+      `NOT REGISTERED  ${u.name}  (${u.path})\n          ${
+        u.reason === "name-mismatch"
+          ? "SKILL.md names it differently than its folder; rename one so they match"
+          : `set newSkills.agents in config.json, run \`skillsym sync\` in a terminal to choose agents, or \`skillsym assign ${u.name} -a <agents>\``
+      }`,
+    );
+  }
   for (const a of actions) {
     const failed = "ok" in a && !a.ok;
     const verb = failed ? "FAILED" : ACTION_TEXT[a.type][dryRun ? 0 : 1];
@@ -1663,7 +1740,7 @@ function formatSync(actions: (SyncAction | SyncActionResult)[], conflicts: SyncC
   for (const c of conflicts) {
     lines.push(`CONFLICT  ${c.skill} -> ${c.agents.join(", ") || "(unassigned)"}  (${c.path})\n          ${c.message}`);
   }
-  if (!actions.length && !conflicts.length) return "Already in sync.";
+  if (!actions.length && !conflicts.length && !registrations.length && !unregistered.length) return "Already in sync.";
   if (conflicts.length) {
     lines.push(
       "",
