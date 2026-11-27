@@ -1,7 +1,8 @@
 import { promises as fs } from "node:fs";
 import path from "node:path";
-import { agentDelivery, builtinAgents, type AgentProfile, type DeliveryMode } from "./agents.js";
+import { agentDelivery, builtinAgents, resolveAgents, type AgentProfile, type DeliveryMode } from "./agents.js";
 import { copyToBackup, moveAside } from "./backup.js";
+import { readConfig } from "./config.js";
 import { isDirectory, isFile } from "./fsutil.js";
 import { hashSkillDir } from "./hash.js";
 import type { Hub } from "./hub.js";
@@ -9,6 +10,7 @@ import { createDirLink, readLinkTarget, removeDirLink } from "./links.js";
 import { withLock, type LockOptions } from "./lock.js";
 import { readManifest, writeManifest, type Manifest } from "./manifest.js";
 import { applySkillsJsonDelivery, generatedManifestPath } from "./skills-json.js";
+import { expandSkillNames, listUnregisteredSkills, registerHubSkillLocked, type UnregisteredSkill } from "./skills.js";
 import { readState, samePath, writeState, type State } from "./state.js";
 import { refreshLibrarySnapshots } from "./snapshots.js";
 import { filterStatus, scanStatus, type StatusEntry } from "./status.js";
@@ -66,6 +68,10 @@ export interface SyncPlan {
   actions: SyncAction[];
   /** Decisions sync will not make on its own; nothing at these paths is changed. */
   conflicts: SyncConflict[];
+  /** New hub skills sync registers (or, in a plan, would register) and assigns to these agents. */
+  registrations: { skill: string; agents: string[] }[];
+  /** Hub folders left unregistered: no agents were given for them, or their SKILL.md name differs from the folder. */
+  unregistered: UnregisteredSkill[];
 }
 
 export interface SyncActionResult extends SyncAction {
@@ -87,7 +93,34 @@ export interface SyncOptions {
   skills?: string[];
   /** Only these agents. */
   agents?: string[];
+  /**
+   * Agents for each new hub skill (ids or "*"), by skill name; skills not listed use config.json's
+   * newSkills.agents. With neither, a new skill stays unregistered and is only reported.
+   */
+  newSkillAgents?: Record<string, string[]>;
   lock?: LockOptions;
+}
+
+/** Which unregistered hub folders sync registers, for which agents. Read-only. */
+async function planRegistrations(hub: Hub, options: SyncOptions, profiles: AgentProfile[]): Promise<Pick<SyncPlan, "registrations" | "unregistered">> {
+  const manifest = await readManifest(hub.manifestPath);
+  let found = await listUnregisteredSkills(hub, manifest);
+  if (options.skills?.length) {
+    const wanted = new Set(expandSkillNames(options.skills, [...Object.keys(manifest.skills), ...found.map((u) => u.name)]));
+    found = found.filter((u) => wanted.has(u.name));
+  }
+  const fallback = (await readConfig(hub.configPath)).newSkills?.agents;
+  const only = options.agents?.length ? (await resolveAgents(options.agents, profiles)).map((a) => a.id) : undefined;
+  const registrations: SyncPlan["registrations"] = [];
+  const unregistered: UnregisteredSkill[] = [];
+  for (const u of found) {
+    const requested = options.newSkillAgents?.[u.name] ?? fallback;
+    let ids = !u.reason && requested ? (await resolveAgents(requested, profiles)).map((a) => a.id) : [];
+    if (only) ids = ids.filter((id) => only.includes(id));
+    if (ids.length) registrations.push({ skill: u.name, agents: ids });
+    else unregistered.push(u);
+  }
+  return { registrations, unregistered };
 }
 
 /** Work out what sync would do. Read-only. */
@@ -101,7 +134,7 @@ export async function planSync(hub: Hub, options: SyncOptions = {}): Promise<Syn
   });
   const state = await readState(hub.statePath);
   const manifest = await readManifest(hub.manifestPath);
-  const plan: SyncPlan = { actions: [], conflicts: [] };
+  const plan: SyncPlan = { actions: [], conflicts: [], ...(await planRegistrations(hub, options, profiles)) };
   const linkEntries = entries.filter((e) => e.delivery !== "skills-json");
   const jsonEntries = entries.filter((e) => e.delivery === "skills-json");
   for (const e of linkEntries) await planEntry(hub, state, e, plan);
@@ -115,7 +148,16 @@ export async function sync(hub: Hub, options: SyncOptions = {}): Promise<SyncRes
     hub.lockPath,
     async () => {
       const profiles = options.profiles ?? builtinAgents();
-      const plan = await planSync(hub, options);
+      // Register first and record the assignment in the manifest: planning then sees them as
+      // assigned but not linked, and links them like any other skill.
+      const { registrations } = await planRegistrations(hub, options, profiles);
+      for (const r of registrations) {
+        await registerHubSkillLocked(hub, r.skill, { profiles });
+        const m = await readManifest(hub.manifestPath);
+        m.skills[r.skill]!.agents = [...r.agents].sort();
+        await writeManifest(hub.manifestPath, m);
+      }
+      const plan = { ...(await planSync(hub, options)), registrations };
       const state = await readState(hub.statePath);
       const manifest = await readManifest(hub.manifestPath);
       const results: SyncActionResult[] = [];

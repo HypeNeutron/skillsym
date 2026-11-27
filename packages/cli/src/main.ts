@@ -1,8 +1,9 @@
 import { spawn } from "node:child_process";
-import { lstatSync, readFileSync } from "node:fs";
+import { lstatSync, readFileSync, watch as fsWatch } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { parseArgs } from "node:util";
+import { startWatching, type WatchRun } from "./watch.js";
 import { complete, completionScript, COMPLETION_SHELLS } from "./completion.js";
 import { commandHelp } from "./help.js";
 import {
@@ -65,6 +66,7 @@ import {
   hasLibrarySnapshot,
   isInGit,
   addConfigAgent,
+  writeNewSkillsAgents,
   removeConfigAgent,
   filterStatus,
   SkillsymError,
@@ -95,6 +97,7 @@ import {
   type SyncAction,
   type SyncActionResult,
   type SyncConflict,
+  type SyncOptions,
 } from "@skillsym/core";
 
 /** 0 = success / no drift, 1 = drift or unresolved conflict, 2 = usage error or failure. */
@@ -138,6 +141,7 @@ Commands:
                                 count. --all also lists links that are fine (synced, covered); --only lists these
                                 statuses, comma-separated; names and -a narrow it to those skills and agents
   check                         Same as status, but exit 1 if anything is not synced (for CI and scripts)
+  watch [-a <agents>]           Keep running: register and link skills you create in the hub's skills folder
   sync [skill...] [-a <agents>] [--dry-run]
                                 Make the agents' folders match the manifest (with names or -a, only those);
                                 asks about conflicts
@@ -213,6 +217,7 @@ export const COMMAND_OPTIONS: Record<string, string[]> = {
   lib: ["dry-run", "yes"],
   library: ["dry-run", "yes"],
   migrate: ["dry-run", "yes"],
+  watch: ["agent"],
 };
 const GLOBAL_OPTIONS = ["json", "help", "version", "global", "project"];
 
@@ -408,7 +413,7 @@ async function run(argv: string[], io: Io, json: boolean): Promise<ExitCode> {
     return 0;
   }
 
-  const writes = (["add", "assign", "sync", "update", "remove", "rm", "import", "eject", "migrate"].includes(command) && !values["dry-run"]) || (command === "config" && rest.length > 0) || ((command === "lib" || command === "library") && ["unlink", "rm", "remove"].includes(rest[0] ?? "") && !values["dry-run"]);
+  const writes = (["add", "assign", "sync", "update", "remove", "rm", "import", "eject", "migrate", "watch"].includes(command) && !values["dry-run"]) || (command === "config" && rest.length > 0) || ((command === "lib" || command === "library") && ["unlink", "rm", "remove"].includes(rest[0] ?? "") && !values["dry-run"]);
   // Only commands that change something create the hub; status, list and --dry-run leave the disk alone.
   const home = resolveHubHome({ env: io.env });
   const hub = writes ? await openHub(home) : hubPaths(home);
@@ -503,9 +508,13 @@ async function run(argv: string[], io: Io, json: boolean): Promise<ExitCode> {
         ...report,
         entries: chosen.entries.filter((e) => !only.length || only.includes(e.status)),
         unmanaged: chosen.unmanaged.filter(() => !only.length || only.includes("unmanaged")),
+        // Hub folders belong to no agent: a skill or agent filter narrows them away, --only keeps them when asked.
+        unregistered: report.unregistered.filter((u) => !values.agent?.length && (!only.length || only.includes("unregistered"))).filter(
+          (u) => !skills.length || skillMatches(skills, u.name),
+        ),
       };
       // What is clean depends on what was asked about; a report on everything keeps its library checks.
-      if (filtered || only.length) view.clean = view.entries.every((e) => e.status === "synced" || e.status === "covered");
+      if (filtered || only.length) view.clean = view.entries.every((e) => e.status === "synced" || e.status === "covered") && !view.unregistered.length;
       if (json) io.stdout(JSON.stringify(view));
       else {
         io.stdout(formatStatus(view, Boolean(values.all) || only.length > 0, filtered || only.length > 0));
@@ -528,26 +537,36 @@ async function run(argv: string[], io: Io, json: boolean): Promise<ExitCode> {
           if (migrated) activeProfiles = await loadProfiles(hub, userHome(io.env));
         }
       }
-      const choice = { profiles: activeProfiles, ...(skills.length ? { skills } : {}), ...(agents.length ? { agents } : {}) };
+      const choice: SyncOptions = { profiles: activeProfiles, ...(skills.length ? { skills } : {}), ...(agents.length ? { agents } : {}) };
       if (values["dry-run"]) {
         const plan = await planSync(hub, choice);
         if (json) io.stdout(JSON.stringify({ dryRun: true, ...plan }));
-        else io.stdout(formatSync(plan.actions, plan.conflicts, true));
-        return plan.conflicts.length ? 1 : 0;
+        else io.stdout(formatSync(plan.actions, plan.conflicts, true, plan.registrations, plan.unregistered));
+        return plan.conflicts.length || plan.unregistered.length ? 1 : 0;
+      }
+      // Only the person answers for a new skill; without a saved setting and a way to ask, it is just reported.
+      if (canAsk) {
+        const preview = await planSync(hub, choice);
+        if (preview.unregistered.some((u) => !u.reason)) {
+          const answers = await askNewSkills(hub, preview.unregistered.filter((u) => !u.reason), io, activeProfiles);
+          if (Object.keys(answers).length) choice.newSkillAgents = answers;
+        }
       }
       const result = await sync(hub, choice);
       if (!json && result.snapshotFailed.length) io.stderr(`warning: could not update the library snapshot of ${result.snapshotFailed.join(", ")}.`);
       if (json) io.stdout(JSON.stringify({ dryRun: false, ...result }));
       // About to ask about conflicts with nothing else to report: "Already in sync" would be untrue.
-      else if (result.results.length || !result.conflicts.length || !canAsk) io.stdout(formatSync(result.results, canAsk ? [] : result.conflicts, false));
+      else if (result.results.length || result.registrations.length || result.unregistered.length || !result.conflicts.length || !canAsk) {
+        io.stdout(formatSync(result.results, canAsk ? [] : result.conflicts, false, result.registrations, result.unregistered));
+      }
       const failed = result.results.some((r) => !r.ok);
-      if (!result.conflicts.length || !canAsk) return failed ? 2 : result.conflicts.length ? 1 : 0;
+      if (!result.conflicts.length || !canAsk) return failed ? 2 : result.conflicts.length || result.unregistered.length ? 1 : 0;
 
       const resolutions = await askAndResolve(hub, result.conflicts, io, activeProfiles);
       io.stdout(formatResolutions(resolutions));
       if (resolutions.some((r) => r.choice === "skip")) io.stdout("\nSkipped conflicts are unchanged. Run `skillsym sync` again whenever you want to decide them.");
       if (failed || resolutions.some((r) => !r.ok)) return 2;
-      return resolutions.some((r) => r.choice === "skip") ? 1 : 0;
+      return resolutions.some((r) => r.choice === "skip") || result.unregistered.length ? 1 : 0;
     }
     case "update": {
       if (agents.length && values.agent?.length) throw new UsageError("update does not take -a; agent links already point to the hub");
@@ -818,6 +837,11 @@ async function run(argv: string[], io: Io, json: boolean): Promise<ExitCode> {
       if (json) io.stdout(JSON.stringify({ configPath: hub.configPath, exists, agents: rows }));
       else io.stdout(formatConfig(hub.configPath, exists, rows));
       return 0;
+    }
+    case "watch": {
+      if (json) throw new UsageError("watch does not take --json: it prints a line per event until you press Ctrl+C");
+      if (rest.length) throw new UsageError("watch takes no names: skillsym watch [-a <agents>]");
+      return runWatch(hub, agents, io, userHome(io.env));
     }
     case "migrate": {
       if (rest.length) throw new UsageError("migrate takes no positional arguments: skillsym migrate [--dry-run] [-y]");
@@ -1526,7 +1550,7 @@ const STATUS_HINT: Record<StatusReport["entries"][number]["status"], string> = {
 };
 
 /** Fine first, so what needs attention ends up next to the summary. */
-const STATUS_ORDER = ["synced", "covered", "missing", "dangling", "replaced", "blocked", "orphaned", "duplicate", "source-missing", "unmanaged"];
+const STATUS_ORDER = ["synced", "covered", "missing", "dangling", "replaced", "blocked", "orphaned", "duplicate", "source-missing", "unmanaged", "unregistered"];
 
 function entryHint(e: StatusReport["entries"][number]): string {
   let hint = STATUS_HINT[e.status];
@@ -1552,10 +1576,18 @@ function entryHint(e: StatusReport["entries"][number]): string {
   return hint;
 }
 
+/** Whether `name` is one of the skill names or patterns ("*" any characters, "?" one); unlike expandSkillNames, no match is not an error. */
+function skillMatches(requested: string[], name: string): boolean {
+  return requested.some((r) => {
+    const source = r.replace(/[.+^${}()|[\]\\]/g, "\\$&").replace(/\*/g, ".*").replace(/\?/g, ".");
+    return new RegExp(`^${source}$`).test(name);
+  });
+}
+
 function formatStatus(report: StatusReport, showAll: boolean, filtered: boolean): string {
   const lines: string[] = [];
   if (!report.entries.length && !filtered) lines.push("No skills assigned yet. Assign one with: skillsym assign <skill> -a <agents>");
-  if (!report.entries.length && !report.unmanaged.length && filtered) lines.push("Nothing matches.");
+  if (!report.entries.length && !report.unmanaged.length && !report.unregistered.length && filtered) lines.push("Nothing matches.");
   const healthy = (s: string) => s === "synced" || s === "covered";
   for (const status of STATUS_ORDER) {
     if (!showAll && healthy(status)) continue;
@@ -1587,6 +1619,15 @@ function formatStatus(report: StatusReport, showAll: boolean, filtered: boolean)
     }
     lines.push(`  bring them in with \`skillsym import\`${listNames ? "" : "; `skillsym status --only unmanaged` lists them"}`);
   }
+  if (report.unregistered.length) {
+    if (lines.length) lines.push("");
+    lines.push(`NOT REGISTERED (${report.unregistered.length})`);
+    const width = Math.max(...report.unregistered.map((u) => u.name.length));
+    for (const u of report.unregistered) {
+      lines.push(`  ${u.name.padEnd(width)}  (${u.path})${u.reason === "name-mismatch" ? "\n      SKILL.md names it differently than its folder; rename one so they match" : ""}`);
+    }
+    lines.push("  in the hub but not in the manifest; register and link with `skillsym sync` or `skillsym assign <name> -a <agents>`");
+  }
   if (lines.length) lines.push("");
   const libraries = filtered ? { missing: [], newSkills: [], missingLibraries: [], folders: [] } : report.libraries;
   for (const m of libraries.missing.filter((m) => !report.entries.some((e) => e.skill === m.skill))) {
@@ -1610,9 +1651,45 @@ function formatStatus(report: StatusReport, showAll: boolean, filtered: boolean)
   for (const e of report.entries) counts.set(e.status, (counts.get(e.status) ?? 0) + 1);
   const summary = [...counts].map(([s, n]) => `${n} ${s}`);
   if (report.unmanaged.length) summary.push(`${report.unmanaged.length} unmanaged`);
+  if (report.unregistered.length) summary.push(`${report.unregistered.length} not registered`);
   const hidden = !showAll && report.entries.some((e) => healthy(e.status));
   if (summary.length) lines.push("", `${summary.join(", ")}.${report.clean ? "" : " Drift found."}${hidden ? " `skillsym status --all` lists every link." : ""}`);
   return lines.join("\n").replace(/\n{3,}/g, "\n\n").trimStart();
+}
+
+/** Run `skillsym watch` until Ctrl+C. Never asks: new skills go to -a, or to config.json's newSkills.agents. */
+async function runWatch(hub: Hub, agents: string[], io: Io, homedir: string): Promise<ExitCode> {
+  const run = async (): Promise<WatchRun> => {
+    const choice: SyncOptions = { profiles: await loadProfiles(hub, homedir), ...(agents.length ? { agents } : {}) };
+    // -a names the agents for new skills too; without it the saved newSkills.agents decides.
+    if (agents.length) {
+      const preview = await planSync(hub, choice);
+      choice.newSkillAgents = Object.fromEntries(preview.unregistered.filter((u) => !u.reason).map((u) => [u.name, agents]));
+    }
+    const result = await sync(hub, choice);
+    const lines = result.registrations.map((r) => `registered ${r.skill} -> ${r.agents.join(", ")}`);
+    for (const r of result.results) {
+      lines.push(r.ok ? `${ACTION_TEXT[r.type][1]} ${r.skill} -> ${r.agents.join(", ") || "(unassigned)"}` : `FAILED ${r.skill}: ${r.error}`);
+    }
+    for (const c of result.conflicts) lines.push(`CONFLICT ${c.skill}: ${c.message}; run \`skillsym sync\` to decide`);
+    return { lines, unregistered: result.unregistered };
+  };
+  const watching = startWatching({
+    watch: (onEvent) => {
+      const w = fsWatch(hub.skillsDir, { recursive: true }, () => onEvent());
+      w.on("error", (err) => io.stderr(`watch: ${err.message}`));
+      return w;
+    },
+    run,
+    print: (line) => io.stdout(line),
+  });
+  io.stdout(`Watching ${hub.skillsDir}; press Ctrl+C to stop.`);
+  await new Promise<void>((resolve) => {
+    process.once("SIGINT", resolve);
+    process.once("SIGTERM", resolve);
+  });
+  watching.close();
+  return 0;
 }
 
 const ACTION_TEXT: Record<SyncAction["type"], [string, string]> = {
@@ -1627,8 +1704,73 @@ const ACTION_TEXT: Record<SyncAction["type"], [string, string]> = {
   "unlink-manifest": ["would remove skills-json manifest", "removed skills-json manifest"],
 };
 
-function formatSync(actions: (SyncAction | SyncActionResult)[], conflicts: SyncConflict[], dryRun: boolean): string {
+/**
+ * Ask, per new hub skill, which agents get it. Returns the agents chosen by skill name; a skill the
+ * person skips ("not now") is left out and stays unregistered. A saved answer applies to later skills too.
+ */
+async function askNewSkills(hub: Hub, found: { name: string }[], io: Io, profiles: AgentProfile[]): Promise<Record<string, string[]>> {
+  const answers: Record<string, string[]> = {};
+  const configIds = (await readConfig(hub.configPath)).agents.map((a) => a.id);
+  const installed: string[] = [];
+  const registered: string[] = [];
+  for (const p of profiles) {
+    const here = await isAgentInstalled(p);
+    if (here) installed.push(p.id);
+    if (here || configIds.includes(p.id)) registered.push(p.id);
+  }
+  for (const u of found) {
+    if (answers[u.name]) continue;
+    const choice = (
+      await io.ask!(
+        [
+          `New skill found in the hub: ${u.name}. Which agents should get it?`,
+          `1) Every installed agent (${installed.join(", ")})  (default)`,
+          "2) Choose agents",
+          "3) Not now — leave it unregistered and ask again next sync",
+          "> ",
+        ].join("\n"),
+      )
+    ).trim();
+    if (choice === "3") continue;
+    let picked: string[];
+    if (choice === "2") {
+      const list = registered.map((id, i) => `${i + 1}) ${id}`).join("  ");
+      const reply = await io.ask!(`Agents (comma-separated numbers): ${list}\n> `);
+      picked = [...new Set(reply.split(",").map((s) => registered[Number(s.trim()) - 1]).filter((id): id is string => id !== undefined))];
+      if (!picked.length) {
+        io.stdout("No agent chosen; leaving it unregistered.");
+        continue;
+      }
+    } else if (choice === "" || choice === "1") picked = ["*"];
+    else {
+      io.stdout(`"${choice}" is not one of the choices; leaving it unregistered.`);
+      continue;
+    }
+    const future = (await io.ask!("Use this answer for future new skills too? (y/N) ")).trim().toLowerCase();
+    if (future === "y" || future === "yes") await writeNewSkillsAgents(hub, picked);
+    for (const f of found) if (future === "y" || future === "yes" || f.name === u.name) answers[f.name] = picked;
+  }
+  return answers;
+}
+
+function formatSync(
+  actions: (SyncAction | SyncActionResult)[],
+  conflicts: SyncConflict[],
+  dryRun: boolean,
+  registrations: { skill: string; agents: string[] }[] = [],
+  unregistered: { name: string; path: string; reason?: string }[] = [],
+): string {
   const lines: string[] = [];
+  for (const r of registrations) lines.push(`${dryRun ? "would register" : "registered"}  ${r.skill} -> ${r.agents.join(", ")}  (new hub skill)`);
+  for (const u of unregistered) {
+    lines.push(
+      `NOT REGISTERED  ${u.name}  (${u.path})\n          ${
+        u.reason === "name-mismatch"
+          ? "SKILL.md names it differently than its folder; rename one so they match"
+          : `set newSkills.agents in config.json, run \`skillsym sync\` in a terminal to choose agents, or \`skillsym assign ${u.name} -a <agents>\``
+      }`,
+    );
+  }
   for (const a of actions) {
     const failed = "ok" in a && !a.ok;
     const verb = failed ? "FAILED" : ACTION_TEXT[a.type][dryRun ? 0 : 1];
@@ -1641,7 +1783,7 @@ function formatSync(actions: (SyncAction | SyncActionResult)[], conflicts: SyncC
   for (const c of conflicts) {
     lines.push(`CONFLICT  ${c.skill} -> ${c.agents.join(", ") || "(unassigned)"}  (${c.path})\n          ${c.message}`);
   }
-  if (!actions.length && !conflicts.length) return "Already in sync.";
+  if (!actions.length && !conflicts.length && !registrations.length && !unregistered.length) return "Already in sync.";
   if (conflicts.length) {
     lines.push(
       "",

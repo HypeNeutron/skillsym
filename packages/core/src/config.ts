@@ -28,6 +28,8 @@ export interface AgentConfig {
 export interface Config {
   version: number;
   agents: AgentConfig[];
+  /** Which agents get a skill newly found in the hub; "*" is every installed agent. Unset: sync asks. */
+  newSkills?: { agents: string[] };
 }
 
 const ID_PATTERN = /^[a-z0-9][a-z0-9_-]{0,31}$/i;
@@ -88,7 +90,39 @@ export async function readConfig(file: string): Promise<Config> {
     if (agent.reload !== undefined && !RELOADS.includes(agent.reload as string)) throw invalid(file, `${where}.reload must be one of ${RELOADS.join(", ")}`);
     return agent as unknown as AgentConfig;
   });
-  return { version: CONFIG_VERSION, agents: result };
+  const newSkills = readNewSkills(file, obj.newSkills, [...builtinAgents().map((a) => a.id), ...result.map((a) => a.id)]);
+  return { version: CONFIG_VERSION, agents: result, ...(newSkills ? { newSkills } : {}) };
+}
+
+function readNewSkills(file: string, value: unknown, known: string[]): Config["newSkills"] {
+  if (value === undefined) return undefined;
+  const list = typeof value === "object" && value !== null ? (value as Record<string, unknown>).agents : undefined;
+  if (!Array.isArray(list) || list.some((x) => typeof x !== "string")) throw invalid(file, `"newSkills.agents" must be a list of agent ids (or "*")`);
+  for (const id of list as string[]) {
+    if (id !== "*" && !known.includes(id)) throw invalid(file, `"newSkills.agents" names unknown agent "${id}"`);
+  }
+  return { agents: list as string[] };
+}
+
+/** Save which agents new hub skills go to, keeping every other field in config.json. */
+export async function writeNewSkillsAgents(hub: Hub, agents: string[], options: { lock?: LockOptions } = {}): Promise<void> {
+  await withLock(
+    hub.lockPath,
+    async () => {
+      const config = await readConfig(hub.configPath);
+      const known = [...builtinAgents().map((a) => a.id), ...config.agents.map((a) => a.id)];
+      readNewSkills(hub.configPath, { agents }, known);
+      let raw: Record<string, unknown> = {};
+      try {
+        raw = JSON.parse((await fs.readFile(hub.configPath, "utf8")).replace(/^﻿/, "")) as Record<string, unknown>;
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
+      }
+      await writeFileAtomic(hub.configPath, `${JSON.stringify({ ...raw, version: CONFIG_VERSION, agents: raw.agents ?? [], newSkills: { agents } }, null, 2)}
+`);
+    },
+    options.lock,
+  );
 }
 
 /** Add an agent to config.json, keeping everything else in the file. An id already known is refused. */

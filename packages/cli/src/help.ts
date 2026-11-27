@@ -119,11 +119,15 @@ Examples:
 Make the agents' folders match the manifest. Fixes what it can decide alone and asks about the rest; run it twice
 and the second run changes nothing. Questions: Enter skips one, q skips the rest, Ctrl+C cancels.
 
+A folder you created directly in the hub's skills folder is a new skill: sync registers it and links it to the agents
+in config.json's newSkills.agents ("*" = every installed agent). If that is not set, sync asks which agents should
+get it; with -y or without a terminal it only reports the folder and exits 1.
+
 Options:
   -a, --agent <ids>  Only these agents
   -s, --skill <name> Skill names, instead of listing them first
   -dr, --dry-run     Show what would change; change nothing
-  -y, --yes          Never ask: conflicts are reported and left alone
+  -y, --yes          Never ask: conflicts and new hub skills are reported and left alone
 
 Names may be patterns: * means any characters, ? one. Keep the quotes.
 
@@ -262,10 +266,30 @@ Without arguments, show the config file's location and every agent with its skil
 
 To change a folder, or to set other fields such as alsoReads, edit the config file.
 
+"newSkills": { "agents": ["claude", "codex"] } sets which agents sync links a skill newly found in the hub to
+("*" = every installed agent). Without it, sync asks; the question can save its answer here.
+
 Examples:
   skillsym config
   skillsym config add windsurf ~/.windsurf/skills
   skillsym config remove windsurf`,
+
+  watch: `Usage: skillsym watch [options]
+
+Keep running and watch the hub's skills folder. A skill folder you create there is registered and linked to your agents
+about 2 seconds after the changes stop; one sync also runs at start, which catches skills made while watch was off.
+It never asks: new skills go to the agents in -a, or in config.json's newSkills.agents. With neither, it prints one
+line per new skill and leaves it alone. If another skillsym command holds the hub, it tries again shortly.
+Press Ctrl+C to stop. To start it at login, see the README.
+
+Options:
+  -a, --agent <ids>  Link new skills to these agents (and only sync these); '*' = every installed agent
+
+watch takes no --dry-run, --json or -y.
+
+Examples:
+  skillsym watch
+  skillsym watch -a claude,codex`,
 
   migrate: `Usage: skillsym migrate [options]
 

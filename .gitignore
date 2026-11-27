@@ -8,3 +8,6 @@ packages/cli/README.md
 packages/*/LICENSE
 *.tgz
 .release/
+
+# build-pipeline worker checkouts
+.worktrees/

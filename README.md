@@ -186,13 +186,29 @@ the hub folder. skillsym creates it with an empty `agents` list, because built-i
     { "id": "windsurf", "skillsDir": "~/.windsurf/skills" },
     { "id": "reader", "skillsDir": "~/.reader/skills", "alsoReads": ["~/.claude/skills"], "reload": "restart" },
     { "id": "my-ide", "delivery": "skills-json", "skillsDir": "~/.my-ide/skills", "skillsJsonPath": "~/.my-ide/skills.json" }
-  ]
+  ],
+  "newSkills": { "agents": ["claude", "codex"] }
 }
 ```
 
 An agent with the same id as a built-in one replaces it. `alsoReads` lists other folders the agent loads skills
 from, so skillsym does not give it a second copy of a skill it already sees. Set `"delivery": "skills-json"` and
 `"skillsJsonPath"` for any custom agent that uses an Antigravity-style `skills.json` manifest instead of folder links.
+
+### Skills you create in the hub
+
+A folder you create straight in the hub (`<hub>/skills/<name>/SKILL.md`) is not in the manifest yet, so no agent
+sees it. skillsym notices it: `status` lists it under "Not registered" and `check` exits 1. Then either:
+
+- `skillsym sync` registers it and links it to the agents in `newSkills.agents` of `config.json` (agent ids, or
+  `"*"` for every installed agent). If that is not set, `sync` in a terminal asks which agents should get it, and can
+  save your answer. With `-y`, `--json` or without a terminal it only reports the folder and exits 1.
+- `skillsym assign <name> -a <agents>` registers it and links it in one step.
+- `skillsym watch` does it for you as soon as you create the folder; see [Watch](#watch).
+
+Ignored: loose files such as `.zip`, folders starting with `.` or `tmp`, folders without a `SKILL.md`, and names
+that are not valid skill names. A folder whose `SKILL.md` `name:` differs from the folder name is reported and never
+registered; rename one of them. A registered skill whose folder you deleted by hand is reported, never unlinked for you.
 
 ## Commands
 
@@ -209,7 +225,8 @@ from, so skillsym does not give it a second copy of a skill it already sees. Set
 | `skillsym open <skill>` | Print a skill's folder and open it in `$EDITOR`, or your file manager. A `--link` skill opens in your library. |
 | `skillsym status [skill...] [-a agents] [--only states] [--all]` | Show links by status: what needs attention, unmanaged skills, news from linked libraries, and a count. `--all` also lists links that are fine; `--only` and names narrow it. |
 | `skillsym check` | Same as `status`, but exits 1 if anything is not in sync (for CI and scripts). |
-| `skillsym sync [skill...] [-a agents] [--dry-run]` | Repair drift, optionally only for those skills or agents. Fixes what it can decide alone and asks about the rest. |
+| `skillsym sync [skill...] [-a agents] [--dry-run]` | Repair drift, optionally only for those skills or agents. Fixes what it can decide alone and asks about the rest. Also registers skill folders you created in the hub (see [Skills you create in the hub](#skills-you-create-in-the-hub)). |
+| `skillsym watch [-a agents]` | Keep running; register and link skills you create in the hub's skills folder once changes settle for 2 seconds. See [Watch](#watch). |
 | `skillsym update [skill...] [--dry-run]` | Fetch and update GitHub-tracked and git-backed skills in the hub (backs up existing copies, asks before overwriting local edits, and keeps skills removed upstream). |
 | `skillsym import [--dry-run]` | Move skills found in agents' folders into the hub. |
 | `skillsym import <skill...> [-a agents]` / `import -a <agents>` | Only those skills, or only copies in those agents' folders. Other agents' copies are not compared or touched. |
@@ -368,6 +385,52 @@ skillsym add https://github.com/owner/repo/tree/main/skills/my-skill
   `.skill-lock.json` entries are also detected automatically, while `NOTICE.md` credits stay informational).
   `skillsym update` prints which upstream files changed plus the exact `git diff` command, then lets you confirm `[m]`
   or pass `--mark-reviewed` once merged.
+
+## Watch
+
+`skillsym watch` watches `<hub>/skills`. About 2 seconds after the changes stop, it registers new skill folders and
+links them to the agents in `-a` or in `newSkills.agents`; it also syncs once when it starts, so skills made while it
+was off are picked up. It never asks: with neither `-a` nor `newSkills.agents`, it prints
+`new skill <name> not registered: set newSkills.agents in config.json or run skillsym sync` once per skill and does
+nothing else. If another skillsym command holds the hub, it tries again shortly. Press Ctrl+C to stop.
+
+To start it at login:
+
+**Windows (Task Scheduler)**
+
+```bat
+schtasks /Create /SC ONLOGON /TN skillsym-watch /TR "npx skillsym watch"
+```
+
+**macOS (launchd)**: save as `~/Library/LaunchAgents/dev.skillsym.watch.plist`, then `launchctl load` it.
+
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>dev.skillsym.watch</string>
+  <key>ProgramArguments</key><array><string>/usr/local/bin/npx</string><string>skillsym</string><string>watch</string></array>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+</dict>
+</plist>
+```
+
+**Linux (systemd user unit)**: save as `~/.config/systemd/user/skillsym-watch.service`, then
+enable it for your user with systemctl (`enable` and `start` on the `skillsym-watch` unit, in user mode).
+
+```ini
+[Unit]
+Description=skillsym watch
+
+[Service]
+ExecStart=/usr/bin/npx skillsym watch
+Restart=on-failure
+
+[Install]
+WantedBy=default.target
+```
 
 ## Antigravity and `skills-json` delivery
 

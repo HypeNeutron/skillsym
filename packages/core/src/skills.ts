@@ -8,7 +8,7 @@ import { isDirectory, isFile, pathExists, renameWithRetry } from "./fsutil.js";
 import { hashSkillDir } from "./hash.js";
 import type { Hub } from "./hub.js";
 import { withLock, type LockOptions } from "./lock.js";
-import { readManifest, writeManifest, type RemoteSkillInfo, type SkillMode, type SkillScope } from "./manifest.js";
+import { readManifest, writeManifest, type Manifest, type RemoteSkillInfo, type SkillMode, type SkillScope } from "./manifest.js";
 import { discoverSkillOrigin, discoverSkillUpstreams, type GitRunner } from "./remote.js";
 
 export interface SkillInfo {
@@ -91,6 +91,97 @@ export async function addSkill(hub: Hub, sourcePath: string, options: AddSkillOp
     },
     options.lock,
   );
+}
+
+/** A hub folder that holds a skill but is not in the manifest. */
+export interface UnregisteredSkill {
+  name: string;
+  path: string;
+  /** Set when the folder is not safe to register: SKILL.md names the skill differently than its folder. */
+  reason?: "name-mismatch";
+}
+
+/** The `name:` in SKILL.md's frontmatter, if any. */
+async function skillMdName(skillDir: string): Promise<string | undefined> {
+  const raw = await fs.readFile(path.join(skillDir, "SKILL.md"), "utf8");
+  const front = /^﻿?---\r?\n([\s\S]*?)\r?\n---/.exec(raw)?.[1];
+  const value = front && /^name:[ \t]*(.*?)[ \t]*$/m.exec(front)?.[1];
+  return value ? value.replace(/^(["'])(.*)\1$/, "$2") || undefined : undefined;
+}
+
+/**
+ * Hub folders that look like skills but are not in the manifest. Loose files, dot and `tmp*` folders
+ * (staging), folders without SKILL.md and invalid names are skipped: they are not finished skills.
+ */
+export async function listUnregisteredSkills(hub: Hub, manifest: Manifest): Promise<UnregisteredSkill[]> {
+  let names: string[];
+  try {
+    names = (await fs.readdir(hub.skillsDir)).sort();
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") return [];
+    throw err;
+  }
+  const found: UnregisteredSkill[] = [];
+  for (const name of names) {
+    if (name.startsWith(".") || name.startsWith("tmp") || !isValidSkillName(name) || manifest.skills[name]) continue;
+    const dir = path.join(hub.skillsDir, name);
+    if (!(await isDirectory(dir)) || !(await isFile(path.join(dir, "SKILL.md")))) continue;
+    const declared = await skillMdName(dir).catch(() => undefined);
+    found.push({ name, path: dir, ...(declared && declared !== name ? { reason: "name-mismatch" as const } : {}) });
+  }
+  return found;
+}
+
+/**
+ * Record a skill folder already in the hub in the manifest, as `add` does for a copy but without
+ * copying. Callers hold the hub lock. Refuses a folder that is not a valid unregistered skill.
+ */
+export async function registerHubSkillLocked(
+  hub: Hub,
+  name: string,
+  options: { profiles?: AgentProfile[]; git?: GitRunner } = {},
+): Promise<SkillInfo> {
+  const manifest = await readManifest(hub.manifestPath);
+  const candidate = (await listUnregisteredSkills(hub, manifest)).find((u) => u.name === name);
+  if (!candidate) throw new SkillsymError("SKILL_NOT_IN_HUB", `"${name}" is not an unregistered skill folder in the hub.`, { skill: name });
+  if (candidate.reason === "name-mismatch") {
+    throw new SkillsymError(
+      "SKILL_NAME_MISMATCH",
+      `Not registering "${name}": its SKILL.md names the skill differently than its folder. Rename the folder or fix the name in SKILL.md.`,
+      { skill: name, path: candidate.path },
+    );
+  }
+  const dest = candidate.path;
+  const remote = await discoverSkillOrigin(name, dest, { hub, profiles: options.profiles, git: options.git });
+  const upstreams = remote ? [] : await discoverSkillUpstreams(name, dest, { hub, profiles: options.profiles, git: options.git });
+  manifest.skills[name] = {
+    agents: [],
+    mode: "link",
+    scope: "user",
+    // No `source`: the hub may itself be a git repo, and update would take it for the skill's origin.
+    sourceHash: await hashSkillDir(dest),
+    ...(remote ? { remote } : {}),
+    ...(upstreams.length ? { upstreams } : {}),
+  };
+  await writeManifest(hub.manifestPath, manifest);
+  return {
+    name,
+    path: dest,
+    agents: [],
+    mode: "link",
+    scope: "user",
+    ...(remote ? { remote } : {}),
+    ...(upstreams.length ? { upstreams } : {}),
+  };
+}
+
+/** Register an unregistered hub skill folder in place, under the hub lock. */
+export async function registerHubSkill(
+  hub: Hub,
+  name: string,
+  options: { profiles?: AgentProfile[]; git?: GitRunner; lock?: LockOptions } = {},
+): Promise<SkillInfo> {
+  return withLock(hub.lockPath, () => registerHubSkillLocked(hub, name, options), options.lock);
 }
 
 /**
